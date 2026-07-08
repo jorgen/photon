@@ -1,0 +1,13 @@
+.idea
+.vscode
+cmake-build-*
+build/
+.DS_Store
+compile_commands.json
+/3rdparty/
+*.swp
+*.swo
+.cache/
+
+# Local out-of-tree build dirs (Linux configure without the macOS-pinned preset)
+build-*/

@@ -1,9 +1,13 @@
 set(public_headers
         photon/photon.h
         photon/error.h
+        photon/params.h
+        photon/decode.h
 )
 set(sources
         photon/version.cpp
+        photon/detail/message.cpp
+        photon/detail/scram.cpp
 )
 
 add_library(photon ${public_headers} ${sources})

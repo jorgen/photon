@@ -48,6 +48,26 @@ TEST_CASE("optional param encodes NULL as absent")
   CHECK(as_text(encode_param(some)) == "7");
 }
 
+TEST_CASE("array params render as Postgres array literals")
+{
+  CHECK(as_text(encode_param(std::vector<int>{1, 2, 3})) == "{\"1\",\"2\",\"3\"}");
+  CHECK(as_text(encode_param(std::vector<std::string>{"a", "b"})) == "{\"a\",\"b\"}");
+  CHECK(as_text(encode_param(std::vector<int>{})) == "{}");
+}
+
+TEST_CASE("array params quote-escape elements and encode NULL for empty optionals")
+{
+  CHECK(as_text(encode_param(std::vector<std::string>{"a\"b", "c\\d"})) == "{\"a\\\"b\",\"c\\\\d\"}");
+  std::vector<std::optional<int>> mixed{1, std::nullopt, 3};
+  CHECK(as_text(encode_param(mixed)) == "{\"1\",NULL,\"3\"}");
+}
+
+TEST_CASE("nested vector params render as multidimensional array literals")
+{
+  std::vector<std::vector<int>> grid{{1, 2}, {3, 4}};
+  CHECK(as_text(encode_param(grid)) == "{{\"1\",\"2\"},{\"3\",\"4\"}}");
+}
+
 TEST_CASE("value codec decodes big-endian integers")
 {
   std::int32_t i32 = 0;

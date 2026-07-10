@@ -33,6 +33,8 @@ struct connect_params_t
   std::chrono::milliseconds connect_timeout = std::chrono::seconds{10};
   std::chrono::milliseconds query_timeout = std::chrono::milliseconds{0};
   std::vector<std::pair<std::string, std::string>> options;
+
+  static result_t<connect_params_t> from_dsn(std::string_view dsn);
 };
 
 result_t<connect_params_t> parse_dsn(std::string_view dsn);

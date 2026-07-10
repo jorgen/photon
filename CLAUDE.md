@@ -128,10 +128,18 @@ policy; only the reflection is reused.
    verify-full accepts the CA and rejects an untrusted server); ASan/TSan/UBSan
    clean; adversarial-review fixes (client-only DSN keywords no longer forwarded
    as GUCs; SNI sent for prefer/require/verify-full).
-4. **Pooling + prism integration**: `pool_t` + a loop-aware `provide_per_thread`
+4. **API revisit** (done): rich structured server errors (`server_error_t` with all
+   `ErrorResponse` fields) + sqlstate classification helpers (`is_unique_violation`,
+   `sqlstate_class`, …); result ergonomics (range-for over `result_set_t`,
+   `query_one<Row>`, `query_value<T>`); `on_notice` callback surfacing
+   `NoticeResponse`; `connect()` returns `shared_ptr<connection_t>` (+ a `dsn`
+   overload, `from_dsn`, `is_broken()`); array params (`param_codec_t<vector<T>>`
+   → `ANY($1)`); server-side prepared statements (`prepare` →
+   `prepared_statement_t`). Offline + live + ASan/TSan/UBSan clean; reviewed.
+5. **Pooling + prism integration**: `pool_t` + a loop-aware `provide_per_thread`
    overload in prism + `photon/prism.h`.
-5. **Breadth**: prepared statements, transactions, more type codecs (numeric, uuid,
-   timestamp, json, arrays), COPY, LISTEN/NOTIFY, pipelining, CancelRequest.
+6. **Breadth**: transactions, more type codecs (numeric, uuid, timestamp, json),
+   COPY, LISTEN/NOTIFY, pipelining, CancelRequest, named parameters.
 
 ## Testing
 

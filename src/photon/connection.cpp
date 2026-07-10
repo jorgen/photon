@@ -102,7 +102,17 @@ connection_t::connection_t(vio::event_loop_t &loop, std::unique_ptr<detail::tran
 {
 }
 
-vio::task_t<result_t<std::unique_ptr<connection_t>>> connection_t::connect(vio::event_loop_t &loop, connect_params_t params)
+vio::task_t<result_t<std::shared_ptr<connection_t>>> connection_t::connect(vio::event_loop_t &loop, std::string_view dsn)
+{
+  auto params = parse_dsn(dsn);
+  if (!params.has_value())
+  {
+    co_return std::unexpected(params.error());
+  }
+  co_return co_await connect(loop, std::move(*params));
+}
+
+vio::task_t<result_t<std::shared_ptr<connection_t>>> connection_t::connect(vio::event_loop_t &loop, connect_params_t params)
 {
   auto tcp_result = co_await detail::connect_raw_tcp(loop, params.host, params.port, params.connect_timeout);
   if (!tcp_result.has_value())
@@ -152,7 +162,7 @@ vio::task_t<result_t<std::unique_ptr<connection_t>>> connection_t::connect(vio::
     }
   }
 
-  auto connection = std::unique_ptr<connection_t>(new connection_t(loop, std::move(transport), std::move(params)));
+  auto connection = std::shared_ptr<connection_t>(new connection_t(loop, std::move(transport), std::move(params)));
   auto ready = co_await connection->handshake();
   if (!ready.has_value())
   {
@@ -250,9 +260,10 @@ vio::task_t<result_t<void>> connection_t::handshake()
       {
         co_return std::unexpected(error.error());
       }
-      co_return fail_server(std::string(error->sqlstate()), std::string(error->message()));
+      co_return fail_server(detail::to_server_error(*error));
     }
     case detail::backend_tag_t::notice_response:
+      dispatch_notice(message->body);
       break;
     default:
       co_return fail(error_kind_t::protocol, "unexpected message during startup");
@@ -272,6 +283,7 @@ vio::task_t<result_t<detail::raw_message_t>> connection_t::next_significant_fram
     switch (static_cast<detail::backend_tag_t>(message->type))
     {
     case detail::backend_tag_t::notice_response:
+      dispatch_notice(message->body);
       continue;
     case detail::backend_tag_t::parameter_status:
     {
@@ -320,7 +332,7 @@ vio::task_t<result_t<void>> connection_t::authenticate_scram(std::span<const std
     {
       co_return std::unexpected(error.error());
     }
-    co_return fail_server(std::string(error->sqlstate()), std::string(error->message()));
+    co_return fail_server(detail::to_server_error(*error));
   }
   if (static_cast<detail::backend_tag_t>(continue_message->type) != detail::backend_tag_t::authentication)
   {
@@ -360,7 +372,7 @@ vio::task_t<result_t<void>> connection_t::authenticate_scram(std::span<const std
     {
       co_return std::unexpected(error.error());
     }
-    co_return fail_server(std::string(error->sqlstate()), std::string(error->message()));
+    co_return fail_server(detail::to_server_error(*error));
   }
   if (static_cast<detail::backend_tag_t>(final_message->type) != detail::backend_tag_t::authentication)
   {
@@ -379,15 +391,18 @@ vio::task_t<result_t<void>> connection_t::authenticate_scram(std::span<const std
   co_return client.handle_server_final(bytes_as_view(final_auth->data));
 }
 
-vio::task_t<result_t<detail::query_data_t>> connection_t::exec_extended(std::string_view sql, std::vector<encoded_param_t> params)
+vio::task_t<result_t<detail::query_data_t>> connection_t::exec_extended(std::string_view statement_name, std::string_view sql, std::vector<encoded_param_t> params)
 {
   std::vector<std::uint8_t> out;
   auto append = [&out](std::vector<std::uint8_t> message) { out.insert(out.end(), message.begin(), message.end()); };
 
   const std::int16_t param_format = detail::format_text;
   const std::int16_t result_format = detail::format_binary;
-  append(detail::parse_message("", sql, {}));
-  append(detail::bind_message("", "", std::span<const std::int16_t>(&param_format, 1), params, std::span<const std::int16_t>(&result_format, 1)));
+  if (statement_name.empty())
+  {
+    append(detail::parse_message("", sql, {}));
+  }
+  append(detail::bind_message("", statement_name, std::span<const std::int16_t>(&param_format, 1), params, std::span<const std::int16_t>(&result_format, 1)));
   append(detail::describe_message('P', ""));
   append(detail::execute_message("", 0));
   append(detail::sync_message());
@@ -395,6 +410,7 @@ vio::task_t<result_t<detail::query_data_t>> connection_t::exec_extended(std::str
   auto sent = co_await _transport->write_all(std::move(out));
   if (!sent.has_value())
   {
+    _broken = true;
     co_return std::unexpected(sent.error());
   }
 
@@ -405,6 +421,7 @@ vio::task_t<result_t<detail::query_data_t>> connection_t::exec_extended(std::str
     auto message = co_await _reader.next();
     if (!message.has_value())
     {
+      _broken = true;
       co_return std::unexpected(message.error());
     }
 
@@ -415,6 +432,7 @@ vio::task_t<result_t<detail::query_data_t>> connection_t::exec_extended(std::str
       auto description = detail::parse_row_description(message->body);
       if (!description.has_value())
       {
+        _broken = true;
         co_return std::unexpected(description.error());
       }
       data.description = std::move(*description);
@@ -438,10 +456,13 @@ vio::task_t<result_t<detail::query_data_t>> connection_t::exec_extended(std::str
       auto error = detail::parse_error_response(message->body);
       if (error.has_value())
       {
-        server_error = error_t{error_kind_t::server, std::string(error->sqlstate()), std::string(error->message())};
+        server_error = error_t{error_kind_t::server, std::string(error->message()), detail::to_server_error(*error)};
       }
       break;
     }
+    case detail::backend_tag_t::notice_response:
+      dispatch_notice(message->body);
+      break;
     case detail::backend_tag_t::ready_for_query:
       if (server_error.has_value())
       {
@@ -454,11 +475,86 @@ vio::task_t<result_t<detail::query_data_t>> connection_t::exec_extended(std::str
   }
 }
 
+vio::task_t<result_t<void>> connection_t::parse_statement(std::string name, std::string_view sql)
+{
+  std::vector<std::uint8_t> out;
+  auto append = [&out](std::vector<std::uint8_t> message) { out.insert(out.end(), message.begin(), message.end()); };
+  append(detail::parse_message(name, sql, {}));
+  append(detail::sync_message());
+
+  auto sent = co_await _transport->write_all(std::move(out));
+  if (!sent.has_value())
+  {
+    _broken = true;
+    co_return std::unexpected(sent.error());
+  }
+
+  std::optional<error_t> server_error;
+  for (;;)
+  {
+    auto message = co_await _reader.next();
+    if (!message.has_value())
+    {
+      _broken = true;
+      co_return std::unexpected(message.error());
+    }
+    switch (static_cast<detail::backend_tag_t>(message->type))
+    {
+    case detail::backend_tag_t::error_response:
+    {
+      auto error = detail::parse_error_response(message->body);
+      if (error.has_value())
+      {
+        server_error = error_t{error_kind_t::server, std::string(error->message()), detail::to_server_error(*error)};
+      }
+      break;
+    }
+    case detail::backend_tag_t::notice_response:
+      dispatch_notice(message->body);
+      break;
+    case detail::backend_tag_t::ready_for_query:
+      if (server_error.has_value())
+      {
+        co_return std::unexpected(*server_error);
+      }
+      co_return result_t<void>{};
+    default:
+      break;
+    }
+  }
+}
+
+vio::task_t<result_t<prepared_statement_t>> connection_t::prepare(std::string_view sql)
+{
+  std::string name = "photon_stmt_" + std::to_string(++_statement_counter);
+  auto parsed = co_await parse_statement(name, sql);
+  if (!parsed.has_value())
+  {
+    co_return std::unexpected(parsed.error());
+  }
+  co_return prepared_statement_t(shared_from_this(), std::move(name));
+}
+
 vio::task_t<void> connection_t::close()
 {
   co_await _transport->write_all(detail::terminate_message());
   _transport->close();
   co_return;
+}
+
+void connection_t::dispatch_notice(std::span<const std::uint8_t> body)
+{
+  if (!_on_notice)
+  {
+    return;
+  }
+  auto notice = detail::parse_error_response(body);
+  if (!notice.has_value())
+  {
+    return;
+  }
+  auto callback = _on_notice;
+  callback(detail::to_server_error(*notice));
 }
 
 std::string_view connection_t::parameter(std::string_view key) const

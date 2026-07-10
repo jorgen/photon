@@ -20,6 +20,20 @@ inline std::vector<std::uint8_t> text_bytes(std::string_view text)
 }
 } // namespace detail
 
+template <typename T>
+encoded_param_t encode_param(const T &value);
+
+template <typename T>
+struct is_vector_t : std::false_type
+{
+};
+template <typename U, typename A>
+struct is_vector_t<std::vector<U, A>> : std::true_type
+{
+};
+template <typename T>
+inline constexpr bool is_vector_v = is_vector_t<T>::value;
+
 template <typename T, typename Enable = void>
 struct param_codec_t;
 
@@ -89,6 +103,47 @@ struct param_codec_t<std::optional<T>>
       return std::nullopt;
     }
     return param_codec_t<T>::encode(*value);
+  }
+};
+
+template <typename T>
+struct param_codec_t<std::vector<T>>
+{
+  static encoded_param_t encode(const std::vector<T> &values)
+  {
+    std::string out = "{";
+    bool first = true;
+    for (const auto &value : values)
+    {
+      if (!first)
+      {
+        out.push_back(',');
+      }
+      first = false;
+      encoded_param_t element = encode_param(value);
+      if (!element.has_value())
+      {
+        out += "NULL";
+        continue;
+      }
+      if constexpr (is_vector_v<T>)
+      {
+        out.append(reinterpret_cast<const char *>(element->data()), element->size());
+        continue;
+      }
+      out.push_back('"');
+      for (std::uint8_t byte : *element)
+      {
+        if (byte == '"' || byte == '\\')
+        {
+          out.push_back('\\');
+        }
+        out.push_back(static_cast<char>(byte));
+      }
+      out.push_back('"');
+    }
+    out.push_back('}');
+    return detail::text_bytes(out);
   }
 };
 

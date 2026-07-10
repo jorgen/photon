@@ -140,6 +140,26 @@ std::string_view error_response_t::field(char code) const
   return {};
 }
 
+server_error_t to_server_error(const error_response_t &response)
+{
+  server_error_t out;
+  std::string_view severity = response.field('V');
+  out.severity = std::string(severity.empty() ? response.field('S') : severity);
+  out.sqlstate = std::string(response.field('C'));
+  out.message = std::string(response.field('M'));
+  out.detail = std::string(response.field('D'));
+  out.hint = std::string(response.field('H'));
+  out.position = std::string(response.field('P'));
+  out.where = std::string(response.field('W'));
+  out.schema = std::string(response.field('s'));
+  out.table = std::string(response.field('t'));
+  out.column = std::string(response.field('c'));
+  out.data_type = std::string(response.field('d'));
+  out.constraint = std::string(response.field('n'));
+  out.routine = std::string(response.field('R'));
+  return out;
+}
+
 result_t<auth_message_t> parse_authentication(std::span<const std::uint8_t> body)
 {
   wire_reader_t r(body);

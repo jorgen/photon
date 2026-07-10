@@ -109,6 +109,8 @@ struct error_response_t
   }
 };
 
+server_error_t to_server_error(const error_response_t &response);
+
 result_t<auth_message_t> parse_authentication(std::span<const std::uint8_t> body);
 result_t<parameter_status_t> parse_parameter_status(std::span<const std::uint8_t> body);
 result_t<backend_key_data_t> parse_backend_key_data(std::span<const std::uint8_t> body);

@@ -31,6 +31,7 @@ jobs:
           POSTGRES_USER: photon
           POSTGRES_PASSWORD: photon
           POSTGRES_DB: photon
+          POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
         ports:
           - 5432:5432
         options: >-

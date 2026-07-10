@@ -317,4 +317,9 @@ result_t<connect_params_t> parse_dsn(std::string_view dsn)
   }
   return params;
 }
+
+result_t<connect_params_t> connect_params_t::from_dsn(std::string_view dsn)
+{
+  return parse_dsn(dsn);
+}
 } // namespace photon

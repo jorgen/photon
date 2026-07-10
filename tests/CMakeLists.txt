@@ -4,6 +4,7 @@ target_compile_definitions(doctest_main PUBLIC DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_
 
 add_executable(photon_tests
         version_tests.cpp
+        error_tests.cpp
         message_tests.cpp
         codec_tests.cpp
         scram_tests.cpp

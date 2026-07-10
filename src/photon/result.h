@@ -121,6 +121,56 @@ public:
     return out;
   }
 
+  class iterator
+  {
+  public:
+    using difference_type = std::ptrdiff_t;
+    using value_type = result_t<Row>;
+
+    iterator(const result_set_t *set, std::size_t index)
+      : _set(set)
+      , _index(index)
+    {
+    }
+
+    result_t<Row> operator*() const
+    {
+      return _set->at(_index);
+    }
+    iterator &operator++()
+    {
+      ++_index;
+      return *this;
+    }
+    iterator operator++(int)
+    {
+      iterator copy = *this;
+      ++_index;
+      return copy;
+    }
+    bool operator==(const iterator &other) const
+    {
+      return _index == other._index;
+    }
+    bool operator!=(const iterator &other) const
+    {
+      return _index != other._index;
+    }
+
+  private:
+    const result_set_t *_set;
+    std::size_t _index;
+  };
+
+  [[nodiscard]] iterator begin() const
+  {
+    return iterator{this, 0};
+  }
+  [[nodiscard]] iterator end() const
+  {
+    return iterator{this, _rows.size()};
+  }
+
 private:
   detail::row_description_t _description;
   std::vector<std::vector<std::uint8_t>> _rows;

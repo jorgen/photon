@@ -37,7 +37,7 @@ void set_port(sockaddr *addr, std::uint16_t port)
 }
 } // namespace
 
-vio::task_t<result_t<std::unique_ptr<transport_t>>> connect_tcp(vio::event_loop_t &loop, const std::string &host, std::uint16_t port, std::chrono::milliseconds timeout)
+vio::task_t<result_t<std::optional<vio::tcp_t>>> connect_raw_tcp(vio::event_loop_t &loop, const std::string &host, std::uint16_t port, std::chrono::milliseconds timeout)
 {
   vio::address_info_t hints;
   hints.family = AF_UNSPEC;
@@ -81,15 +81,35 @@ vio::task_t<result_t<std::unique_ptr<transport_t>>> connect_tcp(vio::event_loop_
       last_error = connected.error().msg;
       continue;
     }
-
-    auto reader = vio::tcp_create_reader(client.value());
-    if (!reader.has_value())
-    {
-      co_return fail(error_kind_t::connection, "failed to create socket reader: " + reader.error().msg);
-    }
-    co_return std::make_unique<tcp_transport_t>(std::move(client.value()), std::move(reader.value()));
+    co_return std::optional<vio::tcp_t>(std::move(client.value()));
   }
 
   co_return fail(error_kind_t::connection, "could not connect to '" + host + "': " + last_error);
+}
+
+result_t<std::unique_ptr<transport_t>> make_tcp_transport(vio::tcp_t tcp)
+{
+  auto reader = vio::tcp_create_reader(tcp);
+  if (!reader.has_value())
+  {
+    return fail(error_kind_t::connection, "failed to create socket reader: " + reader.error().msg);
+  }
+  return std::make_unique<tcp_transport_t>(std::move(tcp), std::move(reader.value()));
+}
+
+vio::task_t<result_t<std::unique_ptr<transport_t>>> upgrade_to_tls(vio::tcp_t tcp, vio::ssl_config_t config, std::string host)
+{
+  auto upgraded = co_await vio::ssl_client_upgrade(std::move(tcp), config, host);
+  if (!upgraded.has_value())
+  {
+    co_return fail(error_kind_t::connection, "TLS handshake failed: " + upgraded.error().msg);
+  }
+
+  auto reader = vio::ssl_client_create_reader(upgraded.value());
+  if (!reader.has_value())
+  {
+    co_return fail(error_kind_t::connection, "failed to create TLS reader: " + reader.error().msg);
+  }
+  co_return std::make_unique<tls_transport_t>(std::move(upgraded.value()), std::move(reader.value()));
 }
 } // namespace photon::detail

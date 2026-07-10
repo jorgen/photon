@@ -47,6 +47,25 @@ TEST_CASE("parse_dsn reads query parameters")
   CHECK(p->options[0].second == "photon");
 }
 
+TEST_CASE("parse_dsn keeps sslrootcert client-side and does not forward it as an option")
+{
+  auto p = parse_dsn("postgresql://u@h/d?sslmode=verify-full&sslrootcert=/etc/ssl/ca.pem&application_name=photon");
+  REQUIRE(p.has_value());
+  CHECK(p->sslmode == sslmode_t::verify_full);
+  CHECK(p->sslrootcert == "/etc/ssl/ca.pem");
+  REQUIRE(p->options.size() == 1);
+  CHECK(p->options[0].first == "application_name");
+}
+
+TEST_CASE("parse_dsn drops libpq client-only keywords instead of forwarding them as GUCs")
+{
+  auto p = parse_dsn("postgresql://u@h/d?target_session_attrs=read-write&gssencmode=disable&channel_binding=require&sslsni=1&application_name=photon&search_path=app");
+  REQUIRE(p.has_value());
+  REQUIRE(p->options.size() == 2);
+  CHECK(p->options[0].first == "application_name");
+  CHECK(p->options[1].first == "search_path");
+}
+
 TEST_CASE("parse_dsn handles a bracketed IPv6 host with a port")
 {
   auto p = parse_dsn("postgresql://u@[::1]:5433/d");

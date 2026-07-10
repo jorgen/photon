@@ -105,6 +105,26 @@ result_t<void> apply_option(connect_params_t &params, std::string_view key, std:
     params.connect_timeout = std::chrono::seconds{seconds};
     return {};
   }
+  if (key == "sslrootcert")
+  {
+    params.sslrootcert = std::string(value);
+    return {};
+  }
+  // Known libpq client-only keywords: consumed/ignored here so they are never
+  // forwarded as PostgreSQL startup runtime parameters (the server would reject
+  // them as "unrecognized configuration parameter"). Genuine server GUCs
+  // (application_name, search_path, client_encoding, options, ...) still pass
+  // through into params.options.
+  static constexpr std::string_view client_only_keywords[] = {
+    "sslcert", "sslkey", "sslpassword", "sslnegotiation", "sslcrl", "sslcrldir", "sslsni", "requiressl", "requirepeer", "hostaddr", "channel_binding", "gssencmode", "gssdelegation", "krbsrvname", "gsslib", "target_session_attrs", "load_balance_hosts", "passfile", "service", "servicefile", "keepalives", "keepalives_idle", "keepalives_interval", "keepalives_count", "tcp_user_timeout",
+  };
+  for (std::string_view client_only : client_only_keywords)
+  {
+    if (key == client_only)
+    {
+      return {};
+    }
+  }
   if (key == "dbname")
   {
     params.database = std::string(value);

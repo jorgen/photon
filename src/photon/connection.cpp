@@ -1,7 +1,11 @@
 #include "photon/connection.h"
 
+#include <cstddef>
 #include <optional>
+#include <span>
 #include <string_view>
+
+#include <vio/operation/tcp.h>
 
 #include "photon/detail/scram.h"
 
@@ -30,6 +34,64 @@ bool mechanism_list_has_scram(std::span<const std::uint8_t> list)
     }
   }
 }
+
+bool sslmode_attempts_tls(sslmode_t mode)
+{
+  return mode == sslmode_t::prefer || mode == sslmode_t::require || mode == sslmode_t::verify_ca || mode == sslmode_t::verify_full;
+}
+
+bool sslmode_requires_tls(sslmode_t mode)
+{
+  return mode == sslmode_t::require || mode == sslmode_t::verify_ca || mode == sslmode_t::verify_full;
+}
+
+vio::ssl_config_t build_ssl_config(const connect_params_t &params)
+{
+  vio::ssl_config_t config;
+  config.peer_verify = (params.sslmode == sslmode_t::verify_ca || params.sslmode == sslmode_t::verify_full) ? vio::peer_verify_t::required : vio::peer_verify_t::disabled;
+  if (!params.sslrootcert.empty())
+  {
+    config.ca_file = params.sslrootcert;
+  }
+  return config;
+}
+
+std::string tls_peer_name(const connect_params_t &params)
+{
+  // The host doubles as SNI and, when peer_verify is on, the verified hostname.
+  // verify-ca verifies the chain but must NOT pin the hostname, so it passes an
+  // empty name; every other TLS mode passes the host so SNI is sent (hostname
+  // verification only actually bites under verify-full, where peer_verify is
+  // required; under prefer/require peer_verify is disabled so a mismatch is
+  // ignored and only SNI is conveyed).
+  return params.sslmode == sslmode_t::verify_ca ? std::string{} : params.host;
+}
+
+vio::task_t<result_t<bool>> request_ssl(vio::tcp_t &tcp)
+{
+  auto sent = co_await vio::write_tcp(tcp, detail::ssl_request_message());
+  if (!sent.has_value())
+  {
+    co_return fail(error_kind_t::connection, "failed to send SSLRequest: " + sent.error().msg);
+  }
+
+  auto reader = vio::tcp_create_reader(tcp);
+  if (!reader.has_value())
+  {
+    co_return fail(error_kind_t::connection, "failed to create reader for SSL negotiation: " + reader.error().msg);
+  }
+  std::byte response[1];
+  auto read = co_await reader.value().read_into(std::span<std::byte>(response, 1));
+  if (!read.has_value())
+  {
+    co_return fail(error_kind_t::connection, "failed to read SSL negotiation response: " + read.error().msg);
+  }
+  if (*read == 0)
+  {
+    co_return fail(error_kind_t::connection, "server closed the connection during SSL negotiation");
+  }
+  co_return static_cast<char>(response[0]) == 'S';
+}
 } // namespace
 
 connection_t::connection_t(vio::event_loop_t &loop, std::unique_ptr<detail::transport_t> transport, connect_params_t params)
@@ -42,18 +104,55 @@ connection_t::connection_t(vio::event_loop_t &loop, std::unique_ptr<detail::tran
 
 vio::task_t<result_t<std::unique_ptr<connection_t>>> connection_t::connect(vio::event_loop_t &loop, connect_params_t params)
 {
-  if (params.sslmode == sslmode_t::require || params.sslmode == sslmode_t::verify_ca || params.sslmode == sslmode_t::verify_full)
+  auto tcp_result = co_await detail::connect_raw_tcp(loop, params.host, params.port, params.connect_timeout);
+  if (!tcp_result.has_value())
   {
-    co_return fail(error_kind_t::connection, "TLS (sslmode require/verify-*) is not supported yet");
+    co_return std::unexpected(tcp_result.error());
+  }
+  vio::tcp_t tcp = std::move(*tcp_result.value());
+
+  std::unique_ptr<detail::transport_t> transport;
+  if (!sslmode_attempts_tls(params.sslmode))
+  {
+    auto plain = detail::make_tcp_transport(std::move(tcp));
+    if (!plain.has_value())
+    {
+      co_return std::unexpected(plain.error());
+    }
+    transport = std::move(plain.value());
+  }
+  else
+  {
+    auto ssl_supported = co_await request_ssl(tcp);
+    if (!ssl_supported.has_value())
+    {
+      co_return std::unexpected(ssl_supported.error());
+    }
+    if (*ssl_supported)
+    {
+      auto tls = co_await detail::upgrade_to_tls(std::move(tcp), build_ssl_config(params), tls_peer_name(params));
+      if (!tls.has_value())
+      {
+        co_return std::unexpected(tls.error());
+      }
+      transport = std::move(tls.value());
+    }
+    else if (sslmode_requires_tls(params.sslmode))
+    {
+      co_return fail(error_kind_t::connection, "server does not support SSL but sslmode requires it");
+    }
+    else
+    {
+      auto plain = detail::make_tcp_transport(std::move(tcp));
+      if (!plain.has_value())
+      {
+        co_return std::unexpected(plain.error());
+      }
+      transport = std::move(plain.value());
+    }
   }
 
-  auto transport = co_await detail::connect_tcp(loop, params.host, params.port, params.connect_timeout);
-  if (!transport.has_value())
-  {
-    co_return std::unexpected(transport.error());
-  }
-
-  auto connection = std::unique_ptr<connection_t>(new connection_t(loop, std::move(*transport), std::move(params)));
+  auto connection = std::unique_ptr<connection_t>(new connection_t(loop, std::move(transport), std::move(params)));
   auto ready = co_await connection->handshake();
   if (!ready.has_value())
   {

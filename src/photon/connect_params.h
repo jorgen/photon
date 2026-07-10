@@ -29,6 +29,7 @@ struct connect_params_t
   std::string user;
   std::string password;
   sslmode_t sslmode = sslmode_t::prefer;
+  std::string sslrootcert;
   std::chrono::milliseconds connect_timeout = std::chrono::seconds{10};
   std::chrono::milliseconds query_timeout = std::chrono::milliseconds{0};
   std::vector<std::pair<std::string, std::string>> options;

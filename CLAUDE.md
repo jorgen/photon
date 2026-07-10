@@ -120,7 +120,14 @@ policy; only the reflection is reused.
    `query<Row>`/`execute` with text params + binary results, `result_set_t<Row>`
    bound via structify. Integration-tested against a real Postgres over SCRAM;
    ASan/TSan/UBSan clean; adversarial-review findings fixed. The vertical slice.
-3. **TLS / sslmode**: add `ssl_client_upgrade` to vio, then the TLS transport.
+3. **TLS / sslmode** (done): added `ssl_client_upgrade` to vio (adopt a connected
+   socket, TLS-handshake as a client), pushed + re-pinned. photon: SSLRequest
+   negotiation, `tls_transport_t`, sslmode disable/allow/prefer/require/verify-ca/
+   verify-full (peer_verify + CA from `sslrootcert`; SNI/hostname pinning per mode).
+   Integration-tested against a real Postgres over TLS 1.3 (require encrypts;
+   verify-full accepts the CA and rejects an untrusted server); ASan/TSan/UBSan
+   clean; adversarial-review fixes (client-only DSN keywords no longer forwarded
+   as GUCs; SNI sent for prefer/require/verify-full).
 4. **Pooling + prism integration**: `pool_t` + a loop-aware `provide_per_thread`
    overload in prism + `photon/prism.h`.
 5. **Breadth**: prepared statements, transactions, more type codecs (numeric, uuid,

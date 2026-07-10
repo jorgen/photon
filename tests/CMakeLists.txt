@@ -7,6 +7,9 @@ add_executable(photon_tests
         message_tests.cpp
         codec_tests.cpp
         scram_tests.cpp
+        dsn_tests.cpp
+        binding_tests.cpp
+        integration_tests.cpp
 )
 target_link_libraries(photon_tests PRIVATE photon doctest_main doctest::doctest)
 

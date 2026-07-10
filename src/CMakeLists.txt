@@ -3,11 +3,18 @@ set(public_headers
         photon/error.h
         photon/params.h
         photon/decode.h
+        photon/connect_params.h
+        photon/row_binding.h
+        photon/result.h
+        photon/connection.h
 )
 set(sources
         photon/version.cpp
+        photon/connect_params.cpp
+        photon/connection.cpp
         photon/detail/message.cpp
         photon/detail/scram.cpp
+        photon/detail/transport.cpp
 )
 
 add_library(photon ${public_headers} ${sources})

@@ -113,10 +113,13 @@ policy; only the reflection is reused.
 ## Delivery phases
 
 0. **Scaffold** (done): repo, CMake/cmake-dep, presets, CI, `error.h`, `version()`.
-1. **Wire codec** (offline, unit-tested): messages, framing, param/value binary
-   codecs, SCRAM.
-2. **Connection + typed SELECT** (plaintext, integration-tested vs a real
-   Postgres): the vertical-slice milestone.
+1. **Wire codec** (done): messages, framing, param/value binary codecs, SCRAM
+   (`vio::crypto` extended + re-pinned).
+2. **Connection + typed SELECT** (done): plaintext `connection_t::connect` (DNS →
+   TCP → startup → SCRAM/cleartext auth → ready), extended-protocol
+   `query<Row>`/`execute` with text params + binary results, `result_set_t<Row>`
+   bound via structify. Integration-tested against a real Postgres over SCRAM;
+   ASan/TSan/UBSan clean; adversarial-review findings fixed. The vertical slice.
 3. **TLS / sslmode**: add `ssl_client_upgrade` to vio, then the TLS transport.
 4. **Pooling + prism integration**: `pool_t` + a loop-aware `provide_per_thread`
    overload in prism + `photon/prism.h`.

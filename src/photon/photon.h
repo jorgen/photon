@@ -7,6 +7,8 @@
 #include "params.h"
 #include "pool.h"
 #include "result.h"
+#include "transaction.h"
+#include "types.h"
 
 namespace photon
 {

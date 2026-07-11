@@ -79,11 +79,23 @@ Everything above the socket is transport-agnostic and templated on a `transport_
 - `result.h` — `result_set_t<Row>` (owns the DataRow buffers + a field→column map;
   `at(i)`/iteration materialise a typed `Row`), `command_result_t` (tag +
   rows_affected).
-- `params.h` — `param_codec_t<T>` customization point (binary Bind params).
+- `params.h` — `param_codec_t<T>` customization point (text Bind params).
 - `decode.h` — `value_codec_t<T>` customization point (binary wire value → T).
+- `types.h` — codecs for richer Postgres types: `uuid_t`, `bytea_t`, `json_t`
+  (json/jsonb; strips the leading `0x01` jsonb version byte), `numeric_t` (binary
+  numeric → decimal string), plus `std::chrono::system_clock::time_point`
+  (timestamp/timestamptz, µs since the 2000 epoch) and `std::chrono::sys_days`
+  (date). Binary decoders + text-param encoders; `std::optional<T>` NULL handling
+  is free via `decode_field`.
+- `transaction.h` / `transaction.cpp` — `transaction_t` (move-only borrow of a
+  `connection_t*`): `co_await conn->begin()`, then `co_await txn.commit()` /
+  `rollback()`. Dropping an active transaction **poisons** the connection
+  (`_broken`, so the pool evicts it and close aborts the open server transaction) —
+  the safety net for the "a destructor can't `co_await`" problem.
 - `row_binding.h` — `std::index_sequence` loop over structify metadata mapping
   result columns to struct fields.
-- `detail/message.h` / `.cpp` — frontend serializers + backend parsers.
+- `detail/message.h` / `.cpp` — frontend serializers + backend parsers (incl.
+  `parse_notification` for the `NotificationResponse` `A` frame).
 - `detail/frame_reader.h` — length-prefixed frame reassembly, timeout-bounded.
 - `detail/transport.h` — `tcp_transport_t` (+ `tls_transport_t` later).
 - `detail/scram.h` / `.cpp` — SCRAM-SHA-256 (+ md5/cleartext) auth.
@@ -149,8 +161,14 @@ policy; only the reflection is reused.
    UBSan clean on default and `PHOTON_WITH_PRISM=ON`; reviewed. Pool convenience
    methods take params **by value** (copied into the coroutine frame) since they
    `co_await acquire()` before using them.
-6. **Breadth**: transactions, more type codecs (numeric, uuid, timestamp, json),
-   COPY, LISTEN/NOTIFY, pipelining, CancelRequest, named parameters.
+6. **Breadth** (6a done): transactions (`begin`/`commit`/`rollback`, poison-on-drop),
+   more type codecs (`uuid`, `timestamp`/`timestamptz`, `date`, `bytea`, `json`/`jsonb`,
+   `numeric`), and LISTEN/NOTIFY (`on_notification` from the query read loops,
+   `listen(channel)` with ident quoting, and a dedicated-listener `next_notification()`).
+   Offline byte-vector codec tests + live round-trips/transaction/notify tests;
+   ASan/TSan/UBSan clean on default and `PHOTON_WITH_PRISM=ON`; reviewed. Remaining
+   breadth (future): COPY, pipelining, CancelRequest, named parameters, per-stream
+   timeouts.
 
 ### Consuming photon + prism together
 

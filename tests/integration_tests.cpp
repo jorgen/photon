@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <optional>
@@ -20,6 +21,17 @@ struct user_t
   std::string name;
   std::optional<std::int32_t> age;
   STFY_OBJ(id, name, age);
+};
+
+struct types_row_t
+{
+  photon::uuid_t id;
+  std::chrono::system_clock::time_point at;
+  std::chrono::sys_days day;
+  photon::bytea_t blob;
+  photon::json_t doc;
+  photon::numeric_t amount;
+  STFY_OBJ(id, at, day, blob, doc, amount);
 };
 
 struct ssl_status_t
@@ -345,6 +357,245 @@ TEST_CASE("integration: sslmode=verify-full verifies the server certificate")
       auto untrusted = co_await photon::connection_t::connect(loop, untrusted_params);
       CHECK_FALSE(untrusted.has_value());
 
+      co_return 0;
+    });
+  CHECK(rc == 0);
+}
+
+TEST_CASE("integration: type codec round-trips for uuid, timestamptz, date, bytea, jsonb, numeric")
+{
+  const char *dsn = std::getenv("PHOTON_PG_TEST_DSN");
+  if (dsn == nullptr)
+  {
+    MESSAGE("PHOTON_PG_TEST_DSN is unset; skipping the type codec integration test");
+    return;
+  }
+  std::string dsn_text = dsn;
+
+  int rc = vio::run(
+    [&dsn_text](vio::event_loop_t &loop) -> vio::task_t<int>
+    {
+      using namespace std::chrono;
+
+      auto connection = co_await photon::connection_t::connect(loop, dsn_text);
+      if (!connection.has_value())
+      {
+        MESSAGE("connect failed: " << connection.error().msg);
+        co_return 1;
+      }
+      auto &conn = *connection;
+
+      (void)co_await conn->execute("DROP TABLE IF EXISTS photon_types");
+      auto create = co_await conn->execute("CREATE TABLE photon_types(id uuid PRIMARY KEY, at timestamptz, day date, blob bytea, doc jsonb, amount numeric)");
+      REQUIRE(create.has_value());
+
+      auto id = photon::uuid_t::parse("550e8400-e29b-41d4-a716-446655440000");
+      REQUIRE(id.has_value());
+      system_clock::time_point at = sys_days{year{2021} / 6 / 15} + hours{12} + minutes{34} + seconds{56} + microseconds{789012};
+      auto day = sys_days{year{2021} / 6 / 15};
+      photon::bytea_t blob{{std::byte{0x01}, std::byte{0x02}, std::byte{0xff}}};
+      photon::json_t doc{"{\"k\": 42}"};
+      photon::numeric_t amount{"12345.6789"};
+
+      auto ins = co_await conn->execute("INSERT INTO photon_types(id, at, day, blob, doc, amount) VALUES ($1, $2, $3, $4, $5, $6)", *id, at, day, blob, doc, amount);
+      if (!ins.has_value())
+      {
+        MESSAGE("insert failed: " << ins.error().msg);
+        co_return 1;
+      }
+
+      auto selected = co_await conn->query<types_row_t>("SELECT id, at, day, blob, doc, amount FROM photon_types");
+      if (!selected.has_value())
+      {
+        MESSAGE("select failed: " << selected.error().msg);
+        co_return 1;
+      }
+      auto row = selected->one();
+      REQUIRE(row.has_value());
+      REQUIRE(row->has_value());
+      const auto &got = **row;
+
+      CHECK(got.id == *id);
+      CHECK(got.day == day);
+      auto want_us = duration_cast<microseconds>(at.time_since_epoch()).count();
+      auto got_us = duration_cast<microseconds>(got.at.time_since_epoch()).count();
+      CHECK(want_us == got_us);
+      REQUIRE(got.blob.data.size() == 3);
+      CHECK(static_cast<std::uint8_t>(got.blob.data[2]) == 0xff);
+      CHECK(got.doc.value.find("42") != std::string::npos);
+      CHECK(got.amount.value == "12345.6789");
+
+      (void)co_await conn->execute("DROP TABLE photon_types");
+      co_await conn->close();
+      co_return 0;
+    });
+  CHECK(rc == 0);
+}
+
+TEST_CASE("integration: date BC and infinity round-trips through Postgres")
+{
+  const char *dsn = std::getenv("PHOTON_PG_TEST_DSN");
+  if (dsn == nullptr)
+  {
+    MESSAGE("PHOTON_PG_TEST_DSN is unset; skipping the date edge-case integration test");
+    return;
+  }
+  std::string dsn_text = dsn;
+
+  int rc = vio::run(
+    [&dsn_text](vio::event_loop_t &loop) -> vio::task_t<int>
+    {
+      using namespace std::chrono;
+
+      auto connection = co_await photon::connection_t::connect(loop, dsn_text);
+      if (!connection.has_value())
+      {
+        MESSAGE("connect failed: " << connection.error().msg);
+        co_return 1;
+      }
+      auto &conn = *connection;
+
+      auto bc = sys_days{year{-44} / 3 / 15};
+      auto round_trip = co_await conn->query_value<sys_days>("SELECT $1::date", bc);
+      if (!round_trip.has_value())
+      {
+        MESSAGE("BC date round-trip failed: " << round_trip.error().msg);
+        co_return 1;
+      }
+      REQUIRE(round_trip->has_value());
+      CHECK(**round_trip == bc);
+
+      auto pos_inf = co_await conn->query_value<sys_days>("SELECT 'infinity'::date");
+      REQUIRE(pos_inf.has_value());
+      REQUIRE(pos_inf->has_value());
+      CHECK(**pos_inf == sys_days::max());
+
+      auto neg_inf = co_await conn->query_value<sys_days>("SELECT '-infinity'::date");
+      REQUIRE(neg_inf.has_value());
+      REQUIRE(neg_inf->has_value());
+      CHECK(**neg_inf == sys_days::min());
+
+      co_await conn->close();
+      co_return 0;
+    });
+  CHECK(rc == 0);
+}
+
+TEST_CASE("integration: transactions commit, roll back, and poison the connection when dropped active")
+{
+  const char *dsn = std::getenv("PHOTON_PG_TEST_DSN");
+  if (dsn == nullptr)
+  {
+    MESSAGE("PHOTON_PG_TEST_DSN is unset; skipping the transaction integration test");
+    return;
+  }
+  std::string dsn_text = dsn;
+
+  int rc = vio::run(
+    [&dsn_text](vio::event_loop_t &loop) -> vio::task_t<int>
+    {
+      auto connection = co_await photon::connection_t::connect(loop, dsn_text);
+      if (!connection.has_value())
+      {
+        MESSAGE("connect failed: " << connection.error().msg);
+        co_return 1;
+      }
+      auto &conn = *connection;
+
+      (void)co_await conn->execute("DROP TABLE IF EXISTS photon_txn");
+      auto create = co_await conn->execute("CREATE TABLE photon_txn(id int PRIMARY KEY)");
+      REQUIRE(create.has_value());
+
+      {
+        auto txn = co_await conn->begin();
+        REQUIRE(txn.has_value());
+        auto ins = co_await conn->execute("INSERT INTO photon_txn(id) VALUES (1)");
+        REQUIRE(ins.has_value());
+        auto committed = co_await txn->commit();
+        REQUIRE(committed.has_value());
+        CHECK_FALSE(txn->active());
+      }
+
+      {
+        auto txn = co_await conn->begin();
+        REQUIRE(txn.has_value());
+        auto ins = co_await conn->execute("INSERT INTO photon_txn(id) VALUES (2)");
+        REQUIRE(ins.has_value());
+        auto rolled = co_await txn->rollback();
+        REQUIRE(rolled.has_value());
+      }
+
+      auto after = co_await conn->query_value<std::int64_t>("SELECT count(*) FROM photon_txn");
+      REQUIRE(after.has_value());
+      REQUIRE(after->has_value());
+      CHECK(**after == 1);
+
+      {
+        auto poisoned = co_await photon::connection_t::connect(loop, dsn_text);
+        REQUIRE(poisoned.has_value());
+        {
+          auto txn = co_await (*poisoned)->begin();
+          REQUIRE(txn.has_value());
+          auto ins = co_await (*poisoned)->execute("INSERT INTO photon_txn(id) VALUES (3)");
+          REQUIRE(ins.has_value());
+        }
+        CHECK((*poisoned)->is_broken());
+        co_await (*poisoned)->close();
+      }
+
+      auto absent = co_await conn->query_value<std::int64_t>("SELECT count(*) FROM photon_txn WHERE id = 3");
+      REQUIRE(absent.has_value());
+      REQUIRE(absent->has_value());
+      CHECK(**absent == 0);
+
+      (void)co_await conn->execute("DROP TABLE photon_txn");
+      co_await conn->close();
+      co_return 0;
+    });
+  CHECK(rc == 0);
+}
+
+TEST_CASE("integration: LISTEN/NOTIFY delivers the process id, channel and payload")
+{
+  const char *dsn = std::getenv("PHOTON_PG_TEST_DSN");
+  if (dsn == nullptr)
+  {
+    MESSAGE("PHOTON_PG_TEST_DSN is unset; skipping the LISTEN/NOTIFY integration test");
+    return;
+  }
+  std::string dsn_text = dsn;
+
+  int rc = vio::run(
+    [&dsn_text](vio::event_loop_t &loop) -> vio::task_t<int>
+    {
+      auto listener = co_await photon::connection_t::connect(loop, dsn_text);
+      if (!listener.has_value())
+      {
+        MESSAGE("listener connect failed: " << listener.error().msg);
+        co_return 1;
+      }
+      auto notifier = co_await photon::connection_t::connect(loop, dsn_text);
+      if (!notifier.has_value())
+      {
+        MESSAGE("notifier connect failed: " << notifier.error().msg);
+        co_return 1;
+      }
+
+      auto listened = co_await (*listener)->listen("photon chan");
+      REQUIRE(listened.has_value());
+
+      auto pending = (*listener)->next_notification();
+      auto notified = co_await (*notifier)->execute("NOTIFY \"photon chan\", 'photon-payload'");
+      REQUIRE(notified.has_value());
+
+      auto note = co_await std::move(pending);
+      REQUIRE(note.has_value());
+      CHECK(note->channel == "photon chan");
+      CHECK(note->payload == "photon-payload");
+      CHECK(note->process_id == (*notifier)->backend_process_id());
+
+      co_await (*listener)->close();
+      co_await (*notifier)->close();
       co_return 0;
     });
   CHECK(rc == 0);

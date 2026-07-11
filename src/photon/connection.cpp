@@ -285,6 +285,9 @@ vio::task_t<result_t<detail::raw_message_t>> connection_t::next_significant_fram
     case detail::backend_tag_t::notice_response:
       dispatch_notice(message->body);
       continue;
+    case detail::backend_tag_t::notification_response:
+      dispatch_notification(message->body);
+      continue;
     case detail::backend_tag_t::parameter_status:
     {
       auto status = detail::parse_parameter_status(message->body);
@@ -463,6 +466,9 @@ vio::task_t<result_t<detail::query_data_t>> connection_t::exec_extended(std::str
     case detail::backend_tag_t::notice_response:
       dispatch_notice(message->body);
       break;
+    case detail::backend_tag_t::notification_response:
+      dispatch_notification(message->body);
+      break;
     case detail::backend_tag_t::ready_for_query:
       if (server_error.has_value())
       {
@@ -512,6 +518,9 @@ vio::task_t<result_t<void>> connection_t::parse_statement(std::string name, std:
     case detail::backend_tag_t::notice_response:
       dispatch_notice(message->body);
       break;
+    case detail::backend_tag_t::notification_response:
+      dispatch_notification(message->body);
+      break;
     case detail::backend_tag_t::ready_for_query:
       if (server_error.has_value())
       {
@@ -535,6 +544,88 @@ vio::task_t<result_t<prepared_statement_t>> connection_t::prepare(std::string_vi
   co_return prepared_statement_t(shared_from_this(), std::move(name));
 }
 
+vio::task_t<result_t<transaction_t>> connection_t::begin()
+{
+  auto started = co_await execute("BEGIN");
+  if (!started.has_value())
+  {
+    co_return std::unexpected(started.error());
+  }
+  co_return transaction_t(this);
+}
+
+vio::task_t<result_t<void>> connection_t::listen(std::string_view channel)
+{
+  std::string sql = "LISTEN \"";
+  for (char c : channel)
+  {
+    if (c == '"')
+    {
+      sql.push_back('"');
+    }
+    sql.push_back(c);
+  }
+  sql.push_back('"');
+
+  auto result = co_await execute(sql);
+  if (!result.has_value())
+  {
+    co_return std::unexpected(result.error());
+  }
+  co_return result_t<void>{};
+}
+
+vio::task_t<result_t<notification_t>> connection_t::next_notification()
+{
+  for (;;)
+  {
+    auto message = co_await _reader.next();
+    if (!message.has_value())
+    {
+      _broken = true;
+      co_return std::unexpected(message.error());
+    }
+    switch (static_cast<detail::backend_tag_t>(message->type))
+    {
+    case detail::backend_tag_t::notification_response:
+    {
+      auto parsed = detail::parse_notification(message->body);
+      if (!parsed.has_value())
+      {
+        _broken = true;
+        co_return std::unexpected(parsed.error());
+      }
+      co_return notification_t{parsed->process_id, std::move(parsed->channel), std::move(parsed->payload)};
+    }
+    case detail::backend_tag_t::notice_response:
+      dispatch_notice(message->body);
+      break;
+    case detail::backend_tag_t::parameter_status:
+    {
+      auto status = detail::parse_parameter_status(message->body);
+      if (status.has_value())
+      {
+        _server_params.push_back(std::move(*status));
+      }
+      break;
+    }
+    case detail::backend_tag_t::error_response:
+    {
+      auto error = detail::parse_error_response(message->body);
+      if (!error.has_value())
+      {
+        _broken = true;
+        co_return std::unexpected(error.error());
+      }
+      _broken = true;
+      co_return fail_server(detail::to_server_error(*error));
+    }
+    default:
+      break;
+    }
+  }
+}
+
 vio::task_t<void> connection_t::close()
 {
   co_await _transport->write_all(detail::terminate_message());
@@ -555,6 +646,21 @@ void connection_t::dispatch_notice(std::span<const std::uint8_t> body)
   }
   auto callback = _on_notice;
   callback(detail::to_server_error(*notice));
+}
+
+void connection_t::dispatch_notification(std::span<const std::uint8_t> body)
+{
+  if (!_on_notification)
+  {
+    return;
+  }
+  auto parsed = detail::parse_notification(body);
+  if (!parsed.has_value())
+  {
+    return;
+  }
+  auto callback = _on_notification;
+  callback(notification_t{parsed->process_id, std::move(parsed->channel), std::move(parsed->payload)});
 }
 
 std::string_view connection_t::parameter(std::string_view key) const

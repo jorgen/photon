@@ -51,6 +51,14 @@ VIO_MAIN(loop, argc, argv)
 - **TLS / `sslmode`** — `disable`/`allow`/`prefer`/`require`/`verify-ca`/`verify-full`,
   negotiated over the same socket (SSLRequest), with cert + hostname verification.
 - **SCRAM-SHA-256** and cleartext authentication.
+- **Transactions** — `co_await conn->begin()` gives a move-only `transaction_t`;
+  `co_await txn.commit()` / `rollback()`. Dropping it un-committed poisons the
+  connection so its open transaction is discarded.
+- **Rich types** — beyond the scalars, `uuid`, `timestamp`/`timestamptz`
+  (`std::chrono::system_clock::time_point`), `date` (`std::chrono::sys_days`),
+  `bytea`, `json`/`jsonb`, and `numeric` decode straight into ergonomic C++ types.
+- **LISTEN / NOTIFY** — an async `on_notification` callback, or a dedicated
+  `next_notification()` listener.
 - **Rich errors** — server errors expose the full `ErrorResponse` (sqlstate, detail,
   hint, constraint, table, column, …) with classification helpers.
 - **Lean & consistent** — errors flow through `result_t<T>`
@@ -112,6 +120,53 @@ auto rows = co_await conn->query<user_t>(
 Teach photon a custom type by specialising `photon::param_codec_t<T>` (encode) and
 `photon::value_codec_t<T>` (decode).
 
+### Data types
+
+Include `<photon/types.h>` (already pulled in by `<photon/photon.h>`) for codecs
+beyond the built-in scalars. They bind as ordinary `Row` fields and as `$n`
+parameters, and `std::optional<T>` handles NULL:
+
+| Postgres                    | C++                                        |
+| --------------------------- | ------------------------------------------ |
+| `uuid`                      | `photon::uuid_t` (`.str()`, `::parse`)     |
+| `timestamp` / `timestamptz` | `std::chrono::system_clock::time_point`    |
+| `date`                      | `std::chrono::sys_days`                     |
+| `bytea`                     | `photon::bytea_t { std::vector<std::byte> }` |
+| `json` / `jsonb`            | `photon::json_t { std::string }`           |
+| `numeric`                   | `photon::numeric_t { std::string }`        |
+
+```cpp
+struct event_t
+{
+  photon::uuid_t id;
+  std::chrono::system_clock::time_point at;   // timestamptz, microsecond precision
+  photon::numeric_t amount;                    // exact decimal, as a string
+  STFY_OBJ(id, at, amount);
+};
+auto rows = co_await conn->query<event_t>("SELECT id, at, amount FROM events WHERE at > $1", since);
+```
+
+`numeric` decodes to its exact decimal string (`NaN`/`Infinity` preserved); `jsonb`
+strips the wire version byte; `timestamptz` is a UTC instant at microsecond
+precision.
+
+### Transactions
+
+```cpp
+auto txn = co_await conn->begin();          // sends BEGIN
+if (!txn) { /* handle */ }
+
+auto moved = co_await conn->execute("UPDATE accounts SET balance = balance - $1 WHERE id = $2", 10, 1);
+if (!moved) { co_await txn->rollback(); }
+else        { co_await txn->commit(); }
+```
+
+`transaction_t` is a move-only **borrow** of the connection — keep the connection
+(or its pool `lease`) alive for the transaction's lifetime. Because a destructor
+cannot `co_await`, dropping a still-active transaction (no `commit`/`rollback`)
+**poisons** the connection (`is_broken()`), so the pool evicts it and closing it
+discards the open server transaction. Prefer an explicit `commit()` / `rollback()`.
+
 ### Prepared statements
 
 ```cpp
@@ -157,6 +212,29 @@ The callback runs synchronously on the event loop; it must not capture the
 connection's own `shared_ptr` (that would form a reference cycle and leak the
 connection) nor destroy the connection while it runs.
 
+## LISTEN / NOTIFY
+
+Subscribe with `listen` (the channel name is quoted as an identifier, so any name
+is safe), then either register an async callback or block a dedicated connection on
+`next_notification`:
+
+```cpp
+co_await conn->listen("jobs");
+
+// async: notifications arriving during other queries are delivered here
+conn->on_notification([](const photon::notification_t &n) {
+  std::println("{} from pid {}: {}", n.channel, n.process_id, n.payload);
+});
+
+// or dedicate a connection to blocking for the next one
+auto note = co_await conn->next_notification();   // result_t<notification_t>
+if (note) std::println("{}: {}", note->channel, note->payload);
+```
+
+`NOTIFY` is a plain statement: `co_await conn->execute("NOTIFY jobs, 'ready'")`.
+The async callback fires whenever a `query`/`execute` read loop encounters a
+notification; `next_notification` is the single-purpose listener.
+
 ## Connection pool
 
 A `connection_t` handles one query at a time, so to run queries concurrently on a
@@ -171,9 +249,9 @@ auto n = co_await pool.query_value<std::int64_t>("SELECT count(*) FROM users");
 
 // or hold a lease across several statements (e.g. a transaction)
 auto lease = co_await pool.acquire();
-co_await (*lease)->execute("BEGIN");
+auto txn = co_await (*lease)->begin();
 co_await (*lease)->execute("UPDATE accounts SET balance = balance - $1 WHERE id = $2", 10, 1);
-co_await (*lease)->execute("COMMIT");
+co_await txn->commit();
 // the connection returns to the pool when `lease` goes out of scope
 ```
 
@@ -236,10 +314,10 @@ integration tests.
 
 Working: connection, SCRAM/cleartext auth, TLS (`sslmode`), typed `query`/`query_one`/
 `query_value`/`execute`, `$n` + array parameters, prepared statements, structured
-errors, and notices. Future work: connection pooling + a prism integration header,
-transactions, `COPY`, `LISTEN`/`NOTIFY`, pipelining, and more type codecs (numeric,
-uuid, timestamp, json, …). See [`CLAUDE.md`](CLAUDE.md) for the architecture and
-roadmap.
+errors, notices, a per-loop connection pool + prism integration, transactions,
+`LISTEN`/`NOTIFY`, and codecs for `uuid`/`timestamp(tz)`/`date`/`bytea`/`json(b)`/
+`numeric`. Future work: `COPY`, pipelining, `CancelRequest`, and named parameters.
+See [`CLAUDE.md`](CLAUDE.md) for the architecture and roadmap.
 
 ## License
 

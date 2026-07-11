@@ -7,6 +7,7 @@ add_executable(photon_tests
         error_tests.cpp
         message_tests.cpp
         codec_tests.cpp
+        type_codec_tests.cpp
         scram_tests.cpp
         dsn_tests.cpp
         binding_tests.cpp

@@ -3,16 +3,19 @@ set(public_headers
         photon/error.h
         photon/params.h
         photon/decode.h
+        photon/types.h
         photon/connect_params.h
         photon/row_binding.h
         photon/result.h
         photon/connection.h
+        photon/transaction.h
         photon/pool.h
 )
 set(sources
         photon/version.cpp
         photon/connect_params.cpp
         photon/connection.cpp
+        photon/transaction.cpp
         photon/pool.cpp
         photon/detail/message.cpp
         photon/detail/scram.cpp

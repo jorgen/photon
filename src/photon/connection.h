@@ -22,6 +22,7 @@
 #include "photon/params.h"
 #include "photon/result.h"
 #include "photon/row_binding.h"
+#include "photon/transaction.h"
 
 namespace photon
 {
@@ -35,6 +36,13 @@ struct query_data_t
   bool has_description = false;
 };
 } // namespace detail
+
+struct notification_t
+{
+  std::int32_t process_id = 0;
+  std::string channel;
+  std::string payload;
+};
 
 class connection_t;
 
@@ -152,12 +160,22 @@ public:
 
   vio::task_t<result_t<prepared_statement_t>> prepare(std::string_view sql);
 
+  vio::task_t<result_t<transaction_t>> begin();
+
   vio::task_t<void> close();
 
   void on_notice(std::function<void(const server_error_t &)> handler)
   {
     _on_notice = std::move(handler);
   }
+
+  void on_notification(std::function<void(const notification_t &)> handler)
+  {
+    _on_notification = std::move(handler);
+  }
+
+  vio::task_t<result_t<void>> listen(std::string_view channel);
+  vio::task_t<result_t<notification_t>> next_notification();
 
   [[nodiscard]] bool is_broken() const
   {
@@ -172,6 +190,7 @@ public:
 
 private:
   friend class prepared_statement_t;
+  friend class transaction_t;
 
   connection_t(vio::event_loop_t &loop, std::unique_ptr<detail::transport_t> transport, connect_params_t params);
 
@@ -181,6 +200,11 @@ private:
   vio::task_t<result_t<detail::query_data_t>> exec_extended(std::string_view statement_name, std::string_view sql, std::vector<encoded_param_t> params);
   vio::task_t<result_t<void>> parse_statement(std::string name, std::string_view sql);
   void dispatch_notice(std::span<const std::uint8_t> body);
+  void dispatch_notification(std::span<const std::uint8_t> body);
+  void poison()
+  {
+    _broken = true;
+  }
 
   vio::event_loop_t *_loop;
   std::unique_ptr<detail::transport_t> _transport;
@@ -188,6 +212,7 @@ private:
   connect_params_t _params;
   std::vector<detail::parameter_status_t> _server_params;
   std::function<void(const server_error_t &)> _on_notice;
+  std::function<void(const notification_t &)> _on_notification;
   std::int32_t _backend_process_id = 0;
   std::int32_t _backend_secret_key = 0;
   std::uint64_t _statement_counter = 0;

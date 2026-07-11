@@ -324,4 +324,25 @@ result_t<error_response_t> parse_error_response(std::span<const std::uint8_t> bo
   }
   return out;
 }
+
+result_t<notification_response_t> parse_notification(std::span<const std::uint8_t> body)
+{
+  wire_reader_t r(body);
+  auto process_id = r.i32();
+  if (!process_id.has_value())
+  {
+    return std::unexpected(process_id.error());
+  }
+  auto channel = r.cstr();
+  if (!channel.has_value())
+  {
+    return std::unexpected(channel.error());
+  }
+  auto payload = r.cstr();
+  if (!payload.has_value())
+  {
+    return std::unexpected(payload.error());
+  }
+  return notification_response_t{*process_id, std::string(*channel), std::string(*payload)};
+}
 } // namespace photon::detail

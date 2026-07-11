@@ -7,11 +7,13 @@ set(public_headers
         photon/row_binding.h
         photon/result.h
         photon/connection.h
+        photon/pool.h
 )
 set(sources
         photon/version.cpp
         photon/connect_params.cpp
         photon/connection.cpp
+        photon/pool.cpp
         photon/detail/message.cpp
         photon/detail/scram.cpp
         photon/detail/transport.cpp
@@ -29,6 +31,10 @@ target_compile_features(photon PUBLIC cxx_std_23)
 target_compile_definitions(photon PRIVATE PHOTON_VERSION="${PROJECT_VERSION}")
 
 target_link_libraries(photon PUBLIC vio::vio structify::structify)
+
+if (PHOTON_WITH_PRISM)
+    target_link_libraries(photon PUBLIC prism::prism)
+endif ()
 
 target_include_directories(photon
         PUBLIC

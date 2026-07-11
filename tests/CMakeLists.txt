@@ -12,6 +12,10 @@ add_executable(photon_tests
         binding_tests.cpp
         integration_tests.cpp
 )
+if (PHOTON_WITH_PRISM)
+    target_sources(photon_tests PRIVATE prism_integration_tests.cpp)
+    target_link_libraries(photon_tests PRIVATE prism::prism)
+endif ()
 target_link_libraries(photon_tests PRIVATE photon doctest_main doctest::doctest)
 
 add_test(NAME photon_tests COMMAND photon_tests)

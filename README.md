@@ -157,6 +157,53 @@ The callback runs synchronously on the event loop; it must not capture the
 connection's own `shared_ptr` (that would form a reference cycle and leak the
 connection) nor destroy the connection while it runs.
 
+## Connection pool
+
+A `connection_t` handles one query at a time, so to run queries concurrently on a
+single event loop use a `pool_t` — a per-loop pool that grows lazily to `max_size`
+and makes callers wait (async) when it is exhausted:
+
+```cpp
+photon::pool_t pool(loop, params, photon::pool_options_t{.max_size = 8});
+
+// convenience: acquire → run → release, in one call
+auto n = co_await pool.query_value<std::int64_t>("SELECT count(*) FROM users");
+
+// or hold a lease across several statements (e.g. a transaction)
+auto lease = co_await pool.acquire();
+co_await (*lease)->execute("BEGIN");
+co_await (*lease)->execute("UPDATE accounts SET balance = balance - $1 WHERE id = $2", 10, 1);
+co_await (*lease)->execute("COMMIT");
+// the connection returns to the pool when `lease` goes out of scope
+```
+
+A broken connection (`is_broken()`) is evicted and replaced on the next acquire.
+
+## prism integration
+
+Build with `-DPHOTON_WITH_PRISM=ON` and include `<photon/prism.h>` to back a
+[prism](https://github.com/jorgen/prism) REST service with a per-worker pool. Each
+prism worker thread gets its own `pool_t`; a handler takes `photon::prism::db` and
+gets a `pool_t&`:
+
+```cpp
+#include <photon/prism.h>
+
+vio::task_t<prism::response_t> count(photon::prism::db db)
+{
+  auto n = co_await db->query_value<std::int64_t>("SELECT count(*) FROM items");
+  co_return prism::response_t::text(prism::status_t::ok, std::to_string(n->value_or(0)));
+}
+
+// during configure:
+photon::prism::provide(app, params);   // registers one pool_t per worker
+app.get("/count", count);
+```
+
+See [`examples/prism_service.cpp`](examples/prism_service.cpp). Both libraries fetch
+vio/structify via cmake-dep; a downstream build must pin the **same vio commit** in
+both (the `SKIP_IF_TARGET` guards then share a single vio target).
+
 ## Build
 
 ```cpp

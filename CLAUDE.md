@@ -136,10 +136,29 @@ policy; only the reflection is reused.
    overload, `from_dsn`, `is_broken()`); array params (`param_codec_t<vector<T>>`
    → `ANY($1)`); server-side prepared statements (`prepare` →
    `prepared_statement_t`). Offline + live + ASan/TSan/UBSan clean; reviewed.
-5. **Pooling + prism integration**: `pool_t` + a loop-aware `provide_per_thread`
-   overload in prism + `photon/prism.h`.
+5. **Pooling + prism integration** (done): `pool_t` — a per-loop pool of
+   `shared_ptr<connection_t>` (lazy to `max_size`, lock-free FIFO async wait when
+   exhausted, RAII `lease_t`, `is_broken()` eviction), so concurrent handlers on
+   one loop multiplex across connections. prism gained a **loop-aware
+   `provide_per_thread`** factory (one-file change in `detail/thread_state.h`;
+   vio pin realigned to `00ace20` + `SKIP_IF_TARGET vio/structify` so photon+prism
+   share one vio target). `photon/prism.h` (behind `PHOTON_WITH_PRISM`):
+   `photon::prism::provide(app, params)` registers a per-worker `pool_t`; handlers
+   take `photon::prism::db` (`per_thread<pool_t>`) and `co_await db->query<Row>(…)`.
+   Live pool concurrency/reuse + an in-process prism-integration test; ASan/TSan/
+   UBSan clean on default and `PHOTON_WITH_PRISM=ON`; reviewed. Pool convenience
+   methods take params **by value** (copied into the coroutine frame) since they
+   `co_await acquire()` before using them.
 6. **Breadth**: transactions, more type codecs (numeric, uuid, timestamp, json),
    COPY, LISTEN/NOTIFY, pipelining, CancelRequest, named parameters.
+
+### Consuming photon + prism together
+
+Both fetch vio/structify via cmake-dep; the `SKIP_IF_TARGET` guards make the
+first project to add a shared target win. A downstream app must pin the **same
+vio commit** in both (only one `vio` target can exist). prism has no install/export
+config yet, so `PHOTON_USE_SYSTEM_PRISM=ON` (find_package) is unsupported — the
+add_subdirectory (fetch) path is the way in.
 
 ## Testing
 

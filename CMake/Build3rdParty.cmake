@@ -13,16 +13,25 @@ macro(Build3rdParty)
     # vio: async I/O runtime (libuv + LibreSSL + coroutines). Built static (with
     # its src/ dir re-exposed as a PUBLIC include, since vio marks headers PRIVATE
     # upstream), or consumed pre-built via find_package when PHOTON_USE_SYSTEM_VIO is set.
-    CmDepAddPackage(vio CONFIG PUBLIC_INCLUDE src
+    # SKIP_IF_TARGET so a build that also pulls prism (which fetches vio/structify)
+    # adds each shared target exactly once, whichever project gets there first.
+    CmDepAddPackage(vio CONFIG PUBLIC_INCLUDE src SKIP_IF_TARGET vio
         OPTIONS VIO_BUILD_TESTS=OFF VIO_BUILD_EXAMPLES=OFF VIO_BUILD_SHARED=OFF VIO_INSTALL=OFF)
 
     # structify: header-only struct reflection + serialization. Provides structify::structify.
-    CmDepAddPackage(structify CONFIG)
+    CmDepAddPackage(structify CONFIG SKIP_IF_TARGET structify)
 
     # doctest: testing framework. Only needed for the test build. vio (when
     # bundled) may already create the `doctest` target, so guard on it.
     if (PHOTON_BUILD_TESTS)
         CmDepAddPackage(doctest CONFIG SKIP_IF_TARGET doctest OPTIONS DOCTEST_WITH_TESTS=OFF)
+    endif ()
+
+    # prism: the REST library, for the optional photon/prism.h integration. It
+    # fetches its own vio/structify (guarded by SKIP_IF_TARGET on both sides so
+    # the shared targets photon already created are reused) plus llhttp.
+    if (PHOTON_WITH_PRISM)
+        CmDepAddPackage(prism CONFIG OPTIONS PRISM_BUILD_TESTS=OFF PRISM_BUILD_EXAMPLES=OFF)
     endif ()
 
     # Restore original flags for photon's own code.

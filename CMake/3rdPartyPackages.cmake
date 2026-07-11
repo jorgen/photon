@@ -15,3 +15,9 @@ CmDepFetchPackage(structify b8fec28d24
 CmDepFetchPackage(doctest 2.4.12
     https://github.com/doctest/doctest/archive/v2.4.12.tar.gz
     SHA256=73381c7aa4dee704bd935609668cf41880ea7f19fa0504a200e13b74999c2d70)
+
+if (PHOTON_WITH_PRISM)
+    CmDepFetchPackage(prism 1661b9a
+        https://github.com/jorgen/prism/archive/1661b9acc03eb6dc0d4b69b75255ddf5aaa0a9d9.tar.gz
+        SHA256=1180da88fff18a89952f7c391ed23ec8c59ef3672dbc66434799e5530e4156c0)
+endif ()

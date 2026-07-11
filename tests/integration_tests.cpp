@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <structify/structify.h>
 
@@ -194,6 +195,66 @@ TEST_CASE("integration: rich server errors, query_value, prepared statements, ar
 
       (void)co_await conn->execute("DROP TABLE photon_items");
       co_await conn->close();
+      co_return 0;
+    });
+  CHECK(rc == 0);
+}
+
+TEST_CASE("integration: pool reuses idle connections and bounds concurrency to max_size")
+{
+  const char *dsn = std::getenv("PHOTON_PG_TEST_DSN");
+  if (dsn == nullptr)
+  {
+    MESSAGE("PHOTON_PG_TEST_DSN is unset; skipping the pool integration test");
+    return;
+  }
+  std::string dsn_text = dsn;
+
+  int rc = vio::run(
+    [&dsn_text](vio::event_loop_t &loop) -> vio::task_t<int>
+    {
+      auto params = photon::parse_dsn(dsn_text);
+      if (!params.has_value())
+      {
+        MESSAGE("bad DSN: " << params.error().msg);
+        co_return 1;
+      }
+      photon::pool_t pool(loop, *params, photon::pool_options_t{.max_size = 2, .min_size = 0});
+
+      {
+        auto lease = co_await pool.acquire();
+        REQUIRE(lease.has_value());
+        auto value = co_await (*lease)->query_value<std::int32_t>("SELECT 1");
+        REQUIRE(value.has_value());
+      }
+      CHECK(pool.size() == 1);
+      CHECK(pool.idle() == 1);
+
+      {
+        auto lease = co_await pool.acquire();
+        REQUIRE(lease.has_value());
+      }
+      CHECK(pool.size() == 1);
+
+      constexpr int concurrent = 6;
+      std::vector<vio::task_t<photon::result_t<std::optional<std::int32_t>>>> tasks;
+      tasks.reserve(concurrent);
+      for (int i = 0; i < concurrent; ++i)
+      {
+        tasks.push_back(pool.query_value<std::int32_t>("SELECT $1::int", i));
+      }
+      int ok = 0;
+      for (int i = 0; i < concurrent; ++i)
+      {
+        auto value = co_await std::move(tasks[static_cast<std::size_t>(i)]);
+        if (value.has_value() && value->has_value() && **value == i)
+        {
+          ++ok;
+        }
+      }
+      CHECK(ok == concurrent);
+      CHECK(pool.size() <= 2);
+
       co_return 0;
     });
   CHECK(rc == 0);

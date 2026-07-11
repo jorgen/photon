@@ -22,6 +22,10 @@ jobs:
           - name: ubsan
             flags: -fsanitize=undefined -fno-omit-frame-pointer -fno-sanitize-recover=all
             linker: -fsanitize=undefined
+          - name: prism-asan
+            flags: -fsanitize=address -fno-omit-frame-pointer
+            linker: -fsanitize=address
+            cmake_extra: -DPHOTON_WITH_PRISM=ON
     name: ${{ matrix.name }}
 
     services:
@@ -74,7 +78,8 @@ jobs:
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DCMAKE_C_FLAGS="${{ matrix.flags }}" \
             -DCMAKE_CXX_FLAGS="${{ matrix.flags }}" \
-            -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.linker }}"
+            -DCMAKE_EXE_LINKER_FLAGS="${{ matrix.linker }}" \
+            ${{ matrix.cmake_extra }}
 
       - name: Build
         env:

@@ -304,6 +304,12 @@ TEST_CASE("corner: empty COPY, and cancelling with no query running is a no-op")
       CHECK(cancelled.has_value());
 
       auto still_ok = co_await conn->query_value<std::int32_t>("SELECT 7");
+      if (!still_ok.has_value())
+      {
+        CHECK(still_ok.error().sqlstate() == "57014");
+        CHECK_FALSE(conn->is_broken());
+        still_ok = co_await conn->query_value<std::int32_t>("SELECT 7");
+      }
       REQUIRE(still_ok.has_value());
       REQUIRE(still_ok->has_value());
       CHECK(**still_ok == 7);

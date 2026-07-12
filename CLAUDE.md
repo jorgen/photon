@@ -104,11 +104,34 @@ Everything above the socket is transport-agnostic and templated on a `transport_
   `connection_t::read_query_result()` (shared by `exec_extended` and independent
   pipelines); `detail::append_extended_query` frames one cycle
   (`query_data_t` also moved to `detail/message.h`).
+- `copy.h` / `copy.cpp` — bulk **COPY**. `conn->copy_in(sql)` → `copy_in_t`
+  (`write`/`write_row` text-formatting with escaping + `\N`, `finish`, `fail`);
+  `conn->copy_out(sql)` → `copy_out_t` (`read_chunk`/`read_all`). Simple-Query
+  based; both borrow the connection and poison it if dropped mid-stream. A
+  statement that does not enter COPY mode is drained to ReadyForQuery and returns a
+  protocol error (never hangs).
+- `named.h` / `named.cpp` — **named parameters**: `named_args_t` +
+  `rewrite_named_params`, a SQL-aware `:name` → `$n` rewriter (skips `::` casts,
+  `'…'`/`E'…'`(with backslash escapes)/`$tag$…$tag$` literals, `"idents"`, and `--`
+  / `/* */` comments). `query`/`execute`/`query_one`/`query_value` gain
+  `named_args_t` overloads (positional variadics SFINAE-guarded off a lone
+  `named_args_t` via `is_named_args_call_v`).
+- **Cancellation & timeouts** (on `connection.*`): `conn->cancel_handle()` →
+  `cancel_handle_t` (captures backend pid/secret + params; `cancel(loop)` opens a
+  fresh transport via the factored `establish_transport` and sends a CancelRequest).
+  `connect_params_t::query_timeout` wraps `read_query_result` in a vio-cancellation
+  watchdog (single-threaded loop ⇒ it can only fire while suspended in a read);
+  on expiry the read is cancelled, the call returns `error_kind_t::timeout`, and the
+  connection is poisoned. Every read/write entry point fast-fails when `_broken`.
 - `row_binding.h` — `std::index_sequence` loop over structify metadata mapping
-  result columns to struct fields.
+  result columns to struct fields; `result.h` `make_result_set<Row>` centralises
+  `query_data_t` → `result_set_t<Row>`.
 - `detail/message.h` / `.cpp` — frontend serializers + backend parsers (incl.
-  `parse_notification` for the `NotificationResponse` `A` frame).
-- `detail/frame_reader.h` — length-prefixed frame reassembly, timeout-bounded.
+  `parse_notification`, `cancel_request_message`, COPY messages, and
+  `parse_data_row_into` for scratch-reusing bulk decode).
+- `detail/frame_reader.h` — length-prefixed frame reassembly. Uses a `_consumed`
+  read cursor (amortised O(1)/frame, no per-frame front-erase) and reads straight
+  into the buffer tail; `wire_writer_t` frames in-place (one alloc/message).
 - `detail/transport.h` — `tcp_transport_t` (+ `tls_transport_t` later).
 - `detail/scram.h` / `.cpp` — SCRAM-SHA-256 (+ md5/cleartext) auth.
 - `pool.h` / `.cpp` — per-loop connection pool (later phase).
@@ -181,10 +204,16 @@ policy; only the reflection is reused.
    ASan/TSan/UBSan clean on default and `PHOTON_WITH_PRISM=ON`; reviewed.
    **6b done**: request pipelining (builder + typed slots, variadic one-shot tuple,
    independent/atomic modes, eager-write/concurrent-read to avoid the large-transfer
-   deadlock). Offline (`append_extended_query`/slot) + live tests incl. a large-batch
-   deadlock regression over TCP and TLS; ASan/TSan/UBSan clean on default and
-   `PHOTON_WITH_PRISM=ON`; reviewed. Remaining breadth (future): COPY, CancelRequest,
-   named parameters, per-stream timeouts.
+   deadlock).
+   **6c done**: COPY in/out, named parameters, CancelRequest, and query timeout
+   (details in the architecture bullets above). Plus a memory-flow pass
+   (frame-reader O(n²)→O(n) `_consumed` cursor, in-place `wire_writer_t` framing,
+   scratch-reusing `collect()`) and an adversarial bug hunt (fixed: COPY/timeout
+   hangs on misuse, E-string named-param parsing) backed by stress tests (100k-row
+   streaming, 4 MB values, 50k-row COPY, 200 concurrent pooled queries). ASan/TSan/
+   UBSan clean on default and `PHOTON_WITH_PRISM=ON`.
+   Remaining breadth (future): true per-statement HTTP/2-style timeouts, pipelined
+   prepared statements, a `pool_t::pipeline()` convenience, connection-level retry.
 
 ### Consuming photon + prism together
 

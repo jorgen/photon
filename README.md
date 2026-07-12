@@ -57,6 +57,12 @@ VIO_MAIN(loop, argc, argv)
 - **Pipelining** — batch many statements into one round-trip via a builder with
   typed result slots, or a variadic one-shot that returns a typed `std::tuple`;
   independent (per-statement) or atomic (all-or-nothing) modes.
+- **COPY** — stream bulk data in (`copy_in`) and out (`copy_out`) far faster than
+  row-by-row `INSERT`/`SELECT`.
+- **Named parameters** — write `:name` placeholders and bind by name; the client
+  rewrites them to `$n` (SQL-aware: casts, strings, and comments are left alone).
+- **Cancellation & timeouts** — cancel an in-flight query from another coroutine
+  (`cancel_handle`), or bound every query with `query_timeout`.
 - **Rich types** — beyond the scalars, `uuid`, `timestamp`/`timestamptz`
   (`std::chrono::system_clock::time_point`), `date` (`std::chrono::sys_days`),
   `bytea`, `json`/`jsonb`, and `numeric` decode straight into ergonomic C++ types.
@@ -227,6 +233,67 @@ responses) never deadlocks. In **independent** mode `run()` fails only on a
 connection/protocol break; per-statement server errors live in each slot. Keep the
 batch bounded — the whole request and all results are buffered in memory.
 
+## Named parameters
+
+Prefer names over positions? Write `:name` placeholders and bind with a
+`named_args_t`; photon rewrites them to `$1, $2, …` client-side (repeats reuse one
+position) and sends the ordinary extended-protocol query:
+
+```cpp
+photon::named_args_t args;
+args.set("min_age", 18).set("name", std::string("ada"));
+auto rows = co_await conn->query<user_t>(
+  "SELECT id, name, age FROM users WHERE age >= :min_age AND name = :name", args);
+```
+
+The rewriter is SQL-aware: `::` casts, `'...'` / `E'...'` / `$tag$…$tag$` string
+literals, `"quoted"` identifiers, and `--` / `/* */` comments are left untouched —
+only real `:name` tokens are substituted. (A `:name` with no supplied value is a
+400-style error, not a silent NULL.)
+
+## COPY (bulk load & unload)
+
+For bulk data, `COPY` is far faster than row-by-row statements. `copy_in` streams
+rows to the server; `copy_out` streams them back:
+
+```cpp
+// Load: COPY ... FROM STDIN
+auto in = co_await conn->copy_in("COPY events(id, label) FROM STDIN");
+std::vector<std::optional<std::string>> row{std::optional<std::string>("1"),
+                                            std::optional<std::string>("start")};
+co_await in->write_row(row);                 // text format, escaping + \N for NULL handled
+co_await in->write(std::string_view("2\tstop\n"));   // or write raw COPY text yourself
+auto loaded = co_await in->finish();         // result_t<command_result_t>; rows_affected
+
+// Unload: COPY ... TO STDOUT
+auto out = co_await conn->copy_out("COPY events TO STDOUT");
+auto text = co_await out->read_all();        // whole stream, or read_chunk() incrementally
+```
+
+Both borrow the connection for the duration; a `copy_in`/`copy_out` dropped mid
+stream poisons the connection (its half-finished COPY is aborted), so drive it to
+`finish()` / end-of-stream on the happy path. Pass CSV/binary options in the SQL
+(`COPY … WITH (FORMAT csv)`) and format the bytes accordingly.
+
+## Cancellation & timeouts
+
+Cancel a query that is already running — from a *different* coroutine, since the
+one that issued it is suspended — with a cancel handle (it opens a fresh
+connection and sends the PostgreSQL CancelRequest):
+
+```cpp
+auto handle = conn->cancel_handle();          // cheap, copyable; capture before the query
+auto running = conn->execute("CALL slow_report()");   // eager task, starts now
+co_await handle.cancel(loop);                 // ... elsewhere / on a timer
+auto result = co_await std::move(running);    // -> server error, sqlstate 57014
+```
+
+Or bound *every* query on a connection with a timeout — set
+`connect_params_t::query_timeout` (0 = off, the default). On expiry the read is
+cancelled, the call returns `error_kind_t::timeout`, and the connection is marked
+broken (`is_broken()`), so a pool drops it. A broken connection fast-fails every
+further call instead of hanging.
+
 ## Errors
 
 Failures are `photon::error_t { error_kind_t kind; std::string msg;
@@ -332,6 +399,36 @@ See [`examples/prism_service.cpp`](examples/prism_service.cpp). Both libraries f
 vio/structify via cmake-dep; a downstream build must pin the **same vio commit** in
 both (the `SKIP_IF_TARGET` guards then share a single vio target).
 
+## Best practices
+
+- **Never concatenate SQL.** Use `$n` (or `:name`) parameters — they are
+  injection-safe and sent out-of-band. Bulk-load with `COPY`, not a loop of
+  `INSERT`s.
+- **One connection runs one statement at a time.** For concurrency on a single
+  event loop, hand out connections from a `pool_t`; don't overlap calls on one
+  `connection_t`.
+- **Keep the owner alive across a borrow.** `transaction_t`, `pipeline_t`,
+  `copy_in_t`/`copy_out_t` and a pool `lease` borrow the connection — hold them
+  (and the connection/lease) until you `commit`/`run`/`finish`. Dropping one
+  mid-operation poisons the connection so its half-done work is discarded.
+- **Pick the right batching.** Independent pipelines cut round-trips for unrelated
+  statements; use `atomic` mode (or wrap in `begin`/`commit`) when it must be
+  all-or-nothing — and then **check `run()`'s result**, which reports a commit-time
+  failure. Keep a pipeline bounded: the whole request and all results are buffered.
+- **Prefer free-function coroutine handlers that take their dependencies by
+  parameter** over capturing lambdas — a suspended coroutine lambda's captures are
+  the classic dangling-`this` footgun. (This is why every handler here is a free
+  function.)
+- **Bound slow work.** Set `query_timeout`; expect a timed-out connection to be
+  dropped (it fast-fails afterwards). Classify server errors with the `is_*`
+  helpers and retry `is_serialization_failure` / `is_deadlock_detected`.
+- **Materialise once.** `collect()` decodes a whole result set (reusing one scratch
+  buffer); range-`for` decodes lazily per row — don't call `at(i)` in a loop if you
+  need every row.
+- On a compiler with the known `auto [a,b] = co_await …` structured-binding leak,
+  bind the pipeline tuple to a named variable first: `auto r = co_await …;
+  auto &[a, b] = r;`.
+
 ## Build
 
 ```cpp
@@ -363,11 +460,12 @@ integration tests.
 ## Status
 
 Working: connection, SCRAM/cleartext auth, TLS (`sslmode`), typed `query`/`query_one`/
-`query_value`/`execute`, `$n` + array parameters, prepared statements, structured
-errors, notices, a per-loop connection pool + prism integration, transactions,
-`LISTEN`/`NOTIFY`, codecs for `uuid`/`timestamp(tz)`/`date`/`bytea`/`json(b)`/
-`numeric`, and request pipelining. Future work: `COPY`, `CancelRequest`, and named
-parameters. See [`CLAUDE.md`](CLAUDE.md) for the architecture and roadmap.
+`query_value`/`execute`, `$n` + array + `:name` parameters, prepared statements,
+structured errors, notices, a per-loop connection pool + prism integration,
+transactions, request pipelining, `COPY` in/out, `CancelRequest`, query timeouts,
+`LISTEN`/`NOTIFY`, and codecs for `uuid`/`timestamp(tz)`/`date`/`bytea`/`json(b)`/
+`numeric`. Future work: per-stream HTTP/2-style timeouts and connection-level
+retry helpers. See [`CLAUDE.md`](CLAUDE.md) for the architecture and roadmap.
 
 ## License
 

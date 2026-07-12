@@ -26,6 +26,15 @@ std::vector<std::uint8_t> ssl_request_message()
   return w.finish();
 }
 
+std::vector<std::uint8_t> cancel_request_message(std::int32_t process_id, std::int32_t secret_key)
+{
+  wire_writer_t w;
+  w.i32(cancel_request_code);
+  w.i32(process_id);
+  w.i32(secret_key);
+  return w.finish();
+}
+
 std::vector<std::uint8_t> password_message(std::string_view password)
 {
   wire_writer_t w('p');
@@ -125,6 +134,26 @@ std::vector<std::uint8_t> query_message(std::string_view sql)
 std::vector<std::uint8_t> terminate_message()
 {
   wire_writer_t w('X');
+  return w.finish();
+}
+
+std::vector<std::uint8_t> copy_data_message(std::span<const std::uint8_t> data)
+{
+  wire_writer_t w('d');
+  w.bytes(data);
+  return w.finish();
+}
+
+std::vector<std::uint8_t> copy_done_message()
+{
+  wire_writer_t w('c');
+  return w.finish();
+}
+
+std::vector<std::uint8_t> copy_fail_message(std::string_view message)
+{
+  wire_writer_t w('f');
+  w.cstr(message);
   return w.finish();
 }
 

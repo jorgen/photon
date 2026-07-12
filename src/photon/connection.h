@@ -17,10 +17,12 @@
 #include <vio/task.h>
 
 #include "photon/connect_params.h"
+#include "photon/copy.h"
 #include "photon/detail/frame_reader.h"
 #include "photon/detail/message.h"
 #include "photon/detail/transport.h"
 #include "photon/error.h"
+#include "photon/named.h"
 #include "photon/params.h"
 #include "photon/pipeline.h"
 #include "photon/result.h"
@@ -34,6 +36,30 @@ struct notification_t
   std::int32_t process_id = 0;
   std::string channel;
   std::string payload;
+};
+
+class cancel_handle_t
+{
+public:
+  cancel_handle_t() = default;
+  cancel_handle_t(connect_params_t params, std::int32_t process_id, std::int32_t secret_key)
+    : _params(std::move(params))
+    , _process_id(process_id)
+    , _secret_key(secret_key)
+  {
+  }
+
+  vio::task_t<result_t<void>> cancel(vio::event_loop_t &loop) const;
+
+  [[nodiscard]] std::int32_t process_id() const
+  {
+    return _process_id;
+  }
+
+private:
+  connect_params_t _params;
+  std::int32_t _process_id = 0;
+  std::int32_t _secret_key = 0;
 };
 
 class connection_t;
@@ -75,7 +101,7 @@ public:
   static vio::task_t<result_t<std::shared_ptr<connection_t>>> connect(vio::event_loop_t &loop, connect_params_t params);
   static vio::task_t<result_t<std::shared_ptr<connection_t>>> connect(vio::event_loop_t &loop, std::string_view dsn);
 
-  template <typename Row, typename... Params>
+  template <typename Row, typename... Params, std::enable_if_t<!is_named_args_call_v<Params...>, int> = 0>
   vio::task_t<result_t<result_set_t<Row>>> query(std::string_view sql, Params &&...params)
   {
     std::vector<encoded_param_t> encoded{encode_param(std::forward<Params>(params))...};
@@ -84,19 +110,21 @@ public:
     {
       co_return std::unexpected(data.error());
     }
-    if (!data->has_description)
-    {
-      co_return fail(error_kind_t::decode, "query returned no result columns");
-    }
-    auto map = build_column_map<Row>(data->description);
-    if (!map.has_value())
-    {
-      co_return std::unexpected(map.error());
-    }
-    co_return result_set_t<Row>(std::move(data->description), std::move(data->rows), *map);
+    co_return make_result_set<Row>(std::move(*data));
   }
 
-  template <typename... Params>
+  template <typename Row>
+  vio::task_t<result_t<result_set_t<Row>>> query(std::string_view sql, const named_args_t &args)
+  {
+    auto data = co_await exec_named(sql, args);
+    if (!data.has_value())
+    {
+      co_return std::unexpected(data.error());
+    }
+    co_return make_result_set<Row>(std::move(*data));
+  }
+
+  template <typename... Params, std::enable_if_t<!is_named_args_call_v<Params...>, int> = 0>
   vio::task_t<result_t<command_result_t>> execute(std::string_view sql, Params &&...params)
   {
     std::vector<encoded_param_t> encoded{encode_param(std::forward<Params>(params))...};
@@ -108,7 +136,17 @@ public:
     co_return make_command_result(std::move(data->command_tag));
   }
 
-  template <typename Row, typename... Params>
+  vio::task_t<result_t<command_result_t>> execute(std::string_view sql, const named_args_t &args)
+  {
+    auto data = co_await exec_named(sql, args);
+    if (!data.has_value())
+    {
+      co_return std::unexpected(data.error());
+    }
+    co_return make_command_result(std::move(data->command_tag));
+  }
+
+  template <typename Row, typename... Params, std::enable_if_t<!is_named_args_call_v<Params...>, int> = 0>
   vio::task_t<result_t<std::optional<Row>>> query_one(std::string_view sql, Params &&...params)
   {
     auto set = co_await query<Row>(sql, std::forward<Params>(params)...);
@@ -119,38 +157,34 @@ public:
     co_return set->one();
   }
 
-  template <typename T, typename... Params>
+  template <typename Row>
+  vio::task_t<result_t<std::optional<Row>>> query_one(std::string_view sql, const named_args_t &args)
+  {
+    auto set = co_await query<Row>(sql, args);
+    if (!set.has_value())
+    {
+      co_return std::unexpected(set.error());
+    }
+    co_return set->one();
+  }
+
+  template <typename T, typename... Params, std::enable_if_t<!is_named_args_call_v<Params...>, int> = 0>
   vio::task_t<result_t<std::optional<T>>> query_value(std::string_view sql, Params &&...params)
   {
     std::vector<encoded_param_t> encoded{encode_param(std::forward<Params>(params))...};
-    auto data = co_await exec_extended("", sql, std::move(encoded));
-    if (!data.has_value())
-    {
-      co_return std::unexpected(data.error());
-    }
-    if (data->rows.empty())
-    {
-      co_return std::optional<T>{};
-    }
-    auto parsed = detail::parse_data_row(data->rows.front());
-    if (!parsed.has_value())
-    {
-      co_return std::unexpected(parsed.error());
-    }
-    if (parsed->columns.empty())
-    {
-      co_return fail(error_kind_t::decode, "query_value: result has no columns");
-    }
-    T value{};
-    auto decoded = decode_field(parsed->columns.front(), value);
-    if (!decoded.has_value())
-    {
-      co_return std::unexpected(decoded.error());
-    }
-    co_return std::optional<T>{std::move(value)};
+    co_return decode_first_value<T>(co_await exec_extended("", sql, std::move(encoded)));
+  }
+
+  template <typename T>
+  vio::task_t<result_t<std::optional<T>>> query_value(std::string_view sql, const named_args_t &args)
+  {
+    co_return decode_first_value<T>(co_await exec_named(sql, args));
   }
 
   vio::task_t<result_t<prepared_statement_t>> prepare(std::string_view sql);
+
+  vio::task_t<result_t<copy_in_t>> copy_in(std::string_view sql);
+  vio::task_t<result_t<copy_out_t>> copy_out(std::string_view sql);
 
   vio::task_t<result_t<transaction_t>> begin();
 
@@ -197,10 +231,17 @@ public:
     return _backend_process_id;
   }
 
+  [[nodiscard]] cancel_handle_t cancel_handle() const
+  {
+    return cancel_handle_t(_params, _backend_process_id, _backend_secret_key);
+  }
+
 private:
   friend class prepared_statement_t;
   friend class transaction_t;
   friend class pipeline_t;
+  friend class copy_in_t;
+  friend class copy_out_t;
 
   connection_t(vio::event_loop_t &loop, std::unique_ptr<detail::transport_t> transport, connect_params_t params);
 
@@ -209,7 +250,48 @@ private:
   vio::task_t<result_t<void>> authenticate_scram(std::span<const std::uint8_t> mechanism_list);
   vio::task_t<result_t<detail::query_data_t>> exec_extended(std::string_view statement_name, std::string_view sql, std::vector<encoded_param_t> params);
   vio::task_t<result_t<detail::query_data_t>> read_query_result();
+  vio::task_t<result_t<detail::query_data_t>> read_frames();
+
+  vio::task_t<result_t<detail::query_data_t>> exec_named(std::string_view sql, const named_args_t &args)
+  {
+    auto rewritten = detail::rewrite_named_params(sql, args.values());
+    if (!rewritten.has_value())
+    {
+      co_return std::unexpected(rewritten.error());
+    }
+    co_return co_await exec_extended("", rewritten->sql, std::move(rewritten->params));
+  }
+
+  template <typename T>
+  static result_t<std::optional<T>> decode_first_value(result_t<detail::query_data_t> data)
+  {
+    if (!data.has_value())
+    {
+      return std::unexpected(data.error());
+    }
+    if (data->rows.empty())
+    {
+      return std::optional<T>{};
+    }
+    auto parsed = detail::parse_data_row(data->rows.front());
+    if (!parsed.has_value())
+    {
+      return std::unexpected(parsed.error());
+    }
+    if (parsed->columns.empty())
+    {
+      return fail(error_kind_t::decode, "query_value: result has no columns");
+    }
+    T value{};
+    auto decoded = decode_field(parsed->columns.front(), value);
+    if (!decoded.has_value())
+    {
+      return std::unexpected(decoded.error());
+    }
+    return std::optional<T>{std::move(value)};
+  }
   vio::task_t<result_t<void>> parse_statement(std::string name, std::string_view sql);
+  vio::task_t<result_t<void>> drain_to_ready();
 
   template <typename... Steps>
   vio::task_t<std::tuple<step_result_t<Steps>...>> run_pipeline_steps(pipeline_mode_t mode, Steps... steps)

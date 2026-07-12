@@ -26,6 +26,7 @@ struct transport_t
   virtual ~transport_t() = default;
   virtual vio::task_t<result_t<std::size_t>> read_some(std::span<std::byte> dst) = 0;
   virtual vio::task_t<result_t<void>> write_all(std::vector<std::uint8_t> bytes) = 0;
+  virtual void cancel_read() = 0;
   virtual void close() = 0;
 };
 
@@ -56,6 +57,11 @@ public:
       co_return fail(error_kind_t::connection, "socket write failed: " + r.error().msg);
     }
     co_return result_t<void>{};
+  }
+
+  void cancel_read() override
+  {
+    _reader.cancel();
   }
 
   void close() override
@@ -119,6 +125,11 @@ public:
       co_return fail(error_kind_t::connection, "tls write failed: " + r.error().msg);
     }
     co_return result_t<void>{};
+  }
+
+  void cancel_read() override
+  {
+    _reader.cancel();
   }
 
   void close() override

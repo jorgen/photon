@@ -112,16 +112,7 @@ private:
     {
       return std::unexpected(data.error());
     }
-    if (!data->has_description)
-    {
-      return fail(error_kind_t::decode, "query returned no result columns");
-    }
-    auto map = build_column_map<Row>(data->description);
-    if (!map.has_value())
-    {
-      return std::unexpected(map.error());
-    }
-    return result_set_t<Row>(std::move(data->description), std::move(data->rows), *map);
+    return make_result_set<Row>(std::move(*data));
   }
 
   vio::task_t<result_t<void>> run_atomic();

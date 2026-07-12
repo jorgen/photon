@@ -2,8 +2,10 @@
 
 #include "connect_params.h"
 #include "connection.h"
+#include "copy.h"
 #include "decode.h"
 #include "error.h"
+#include "named.h"
 #include "params.h"
 #include "pipeline.h"
 #include "pool.h"

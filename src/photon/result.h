@@ -176,4 +176,19 @@ private:
   std::vector<std::vector<std::uint8_t>> _rows;
   column_map_t<Row> _map;
 };
+
+template <typename Row>
+result_t<result_set_t<Row>> make_result_set(detail::query_data_t data)
+{
+  if (!data.has_description)
+  {
+    return fail(error_kind_t::decode, "query returned no result columns");
+  }
+  auto map = build_column_map<Row>(data.description);
+  if (!map.has_value())
+  {
+    return std::unexpected(map.error());
+  }
+  return result_set_t<Row>(std::move(data.description), std::move(data.rows), *map);
+}
 } // namespace photon

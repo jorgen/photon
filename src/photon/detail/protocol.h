@@ -38,6 +38,11 @@ enum class backend_tag_t : std::uint8_t
   parameter_description = 't',
   portal_suspended = 's',
   notification_response = 'A',
+  copy_in_response = 'G',
+  copy_out_response = 'H',
+  copy_both_response = 'W',
+  copy_data = 'd',
+  copy_done = 'c',
 };
 
 enum class auth_request_t : std::int32_t

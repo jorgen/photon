@@ -1,9 +1,11 @@
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -999,6 +1001,201 @@ TEST_CASE("integration: a large pipeline over TLS does not deadlock")
         REQUIRE(one->has_value());
         CHECK((*one)->blob.size() == big.size());
       }
+
+      co_await conn->close();
+      co_return 0;
+    });
+  CHECK(rc == 0);
+}
+
+TEST_CASE("integration: named parameters bind by name")
+{
+  const char *dsn = std::getenv("PHOTON_PG_TEST_DSN");
+  if (dsn == nullptr)
+  {
+    MESSAGE("PHOTON_PG_TEST_DSN is unset; skipping the named-parameter test");
+    return;
+  }
+  std::string dsn_text = dsn;
+
+  int rc = vio::run(
+    [&dsn_text](vio::event_loop_t &loop) -> vio::task_t<int>
+    {
+      auto connection = co_await photon::connection_t::connect(loop, dsn_text);
+      if (!connection.has_value())
+      {
+        MESSAGE("connect failed: " << connection.error().msg);
+        co_return 1;
+      }
+      auto &conn = *connection;
+
+      (void)co_await conn->execute("DROP TABLE IF EXISTS photon_named");
+      REQUIRE((co_await conn->execute("CREATE TABLE photon_named(id int PRIMARY KEY, name text)")).has_value());
+      REQUIRE((co_await conn->execute("INSERT INTO photon_named(id, name) VALUES (1,'ada'),(2,'bob')")).has_value());
+
+      photon::named_args_t args;
+      args.set("min", 1).set("name", std::string("ada"));
+      auto row = co_await conn->query_one<pipe_row_t>("SELECT id, name AS label FROM photon_named WHERE id >= :min AND name = :name", args);
+      REQUIRE(row.has_value());
+      REQUIRE(row->has_value());
+      CHECK((*row)->id == 1);
+      CHECK((*row)->label == "ada");
+
+      photon::named_args_t reused;
+      reused.set("v", 2);
+      auto val = co_await conn->query_value<std::int64_t>("SELECT count(*) FROM photon_named WHERE id = :v OR id = :v", reused);
+      REQUIRE(val.has_value());
+      REQUIRE(val->has_value());
+      CHECK(**val == 1);
+
+      (void)co_await conn->execute("DROP TABLE photon_named");
+      co_await conn->close();
+      co_return 0;
+    });
+  CHECK(rc == 0);
+}
+
+TEST_CASE("integration: COPY IN loads rows and COPY OUT reads them back")
+{
+  const char *dsn = std::getenv("PHOTON_PG_TEST_DSN");
+  if (dsn == nullptr)
+  {
+    MESSAGE("PHOTON_PG_TEST_DSN is unset; skipping the COPY test");
+    return;
+  }
+  std::string dsn_text = dsn;
+
+  int rc = vio::run(
+    [&dsn_text](vio::event_loop_t &loop) -> vio::task_t<int>
+    {
+      auto connection = co_await photon::connection_t::connect(loop, dsn_text);
+      if (!connection.has_value())
+      {
+        MESSAGE("connect failed: " << connection.error().msg);
+        co_return 1;
+      }
+      auto &conn = *connection;
+
+      (void)co_await conn->execute("DROP TABLE IF EXISTS photon_copy");
+      REQUIRE((co_await conn->execute("CREATE TABLE photon_copy(id int, label text)")).has_value());
+
+      auto ci = co_await conn->copy_in("COPY photon_copy(id, label) FROM STDIN");
+      if (!ci.has_value())
+      {
+        MESSAGE("copy_in failed: " << ci.error().msg);
+        co_return 1;
+      }
+      std::vector<std::optional<std::string>> row1{std::optional<std::string>("1"), std::optional<std::string>("ada")};
+      std::vector<std::optional<std::string>> row2{std::optional<std::string>("2"), std::nullopt};
+      REQUIRE((co_await ci->write_row(row1)).has_value());
+      REQUIRE((co_await ci->write_row(row2)).has_value());
+      REQUIRE((co_await ci->write(std::string_view("3\tcar\\tol\n"))).has_value());
+      auto done = co_await ci->finish();
+      REQUIRE(done.has_value());
+      CHECK(done->rows_affected == 3);
+
+      auto count = co_await conn->query_value<std::int64_t>("SELECT count(*) FROM photon_copy");
+      REQUIRE(count.has_value());
+      CHECK(**count == 3);
+      auto nulls = co_await conn->query_value<std::int64_t>("SELECT count(*) FROM photon_copy WHERE label IS NULL");
+      REQUIRE(nulls.has_value());
+      CHECK(**nulls == 1);
+
+      auto co_reader = co_await conn->copy_out("COPY photon_copy TO STDOUT");
+      if (!co_reader.has_value())
+      {
+        MESSAGE("copy_out failed: " << co_reader.error().msg);
+        co_return 1;
+      }
+      auto text = co_await co_reader->read_all();
+      REQUIRE(text.has_value());
+      CHECK(std::count(text->begin(), text->end(), '\n') == 3);
+      CHECK(text->find("ada") != std::string::npos);
+      CHECK(text->find("\\N") != std::string::npos);
+      CHECK_FALSE(conn->is_broken());
+
+      (void)co_await conn->execute("DROP TABLE photon_copy");
+      co_await conn->close();
+      co_return 0;
+    });
+  CHECK(rc == 0);
+}
+
+TEST_CASE("integration: CancelRequest cancels a running query")
+{
+  const char *dsn = std::getenv("PHOTON_PG_TEST_DSN");
+  if (dsn == nullptr)
+  {
+    MESSAGE("PHOTON_PG_TEST_DSN is unset; skipping the CancelRequest test");
+    return;
+  }
+  std::string dsn_text = dsn;
+
+  int rc = vio::run(
+    [&dsn_text](vio::event_loop_t &loop) -> vio::task_t<int>
+    {
+      auto connection = co_await photon::connection_t::connect(loop, dsn_text);
+      if (!connection.has_value())
+      {
+        MESSAGE("connect failed: " << connection.error().msg);
+        co_return 1;
+      }
+      auto &conn = *connection;
+
+      auto handle = conn->cancel_handle();
+      auto slow = conn->execute("SELECT pg_sleep(3)");
+      auto cancelled = co_await handle.cancel(loop);
+      REQUIRE(cancelled.has_value());
+
+      auto result = co_await std::move(slow);
+      REQUIRE_FALSE(result.has_value());
+      CHECK(result.error().sqlstate() == "57014");
+      CHECK_FALSE(conn->is_broken());
+
+      co_await conn->close();
+      co_return 0;
+    });
+  CHECK(rc == 0);
+}
+
+TEST_CASE("integration: query_timeout aborts a slow query")
+{
+  const char *dsn = std::getenv("PHOTON_PG_TEST_DSN");
+  if (dsn == nullptr)
+  {
+    MESSAGE("PHOTON_PG_TEST_DSN is unset; skipping the query_timeout test");
+    return;
+  }
+  std::string dsn_text = dsn;
+
+  int rc = vio::run(
+    [&dsn_text](vio::event_loop_t &loop) -> vio::task_t<int>
+    {
+      auto params = photon::parse_dsn(dsn_text);
+      if (!params.has_value())
+      {
+        MESSAGE("bad DSN: " << params.error().msg);
+        co_return 1;
+      }
+      params->query_timeout = std::chrono::milliseconds{500};
+
+      auto connection = co_await photon::connection_t::connect(loop, *params);
+      if (!connection.has_value())
+      {
+        MESSAGE("connect failed: " << connection.error().msg);
+        co_return 1;
+      }
+      auto &conn = *connection;
+
+      auto quick = co_await conn->query_value<std::int32_t>("SELECT 1");
+      REQUIRE(quick.has_value());
+      REQUIRE(quick->has_value());
+      CHECK(**quick == 1);
+
+      auto slow = co_await conn->execute("SELECT pg_sleep(5)");
+      REQUIRE_FALSE(slow.has_value());
+      CHECK(slow.error().kind == photon::error_kind_t::timeout);
+      CHECK(conn->is_broken());
 
       co_await conn->close();
       co_return 0;

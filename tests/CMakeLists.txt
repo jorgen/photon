@@ -12,6 +12,7 @@ add_executable(photon_tests
         dsn_tests.cpp
         binding_tests.cpp
         pipeline_tests.cpp
+        named_tests.cpp
         integration_tests.cpp
 )
 if (PHOTON_WITH_PRISM)

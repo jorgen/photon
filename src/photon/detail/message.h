@@ -21,6 +21,7 @@ struct startup_param_t
 
 std::vector<std::uint8_t> startup_message(std::string_view user, std::string_view database, std::span<const startup_param_t> extra = {});
 std::vector<std::uint8_t> ssl_request_message();
+std::vector<std::uint8_t> cancel_request_message(std::int32_t process_id, std::int32_t secret_key);
 std::vector<std::uint8_t> password_message(std::string_view password);
 std::vector<std::uint8_t> sasl_initial_response_message(std::string_view mechanism, std::string_view initial_response);
 std::vector<std::uint8_t> sasl_response_message(std::string_view response);
@@ -34,6 +35,9 @@ std::vector<std::uint8_t> execute_message(std::string_view portal, std::int32_t 
 std::vector<std::uint8_t> sync_message();
 std::vector<std::uint8_t> query_message(std::string_view sql);
 std::vector<std::uint8_t> terminate_message();
+std::vector<std::uint8_t> copy_data_message(std::span<const std::uint8_t> data);
+std::vector<std::uint8_t> copy_done_message();
+std::vector<std::uint8_t> copy_fail_message(std::string_view message);
 
 void append_extended_query(std::vector<std::uint8_t> &out, std::string_view statement, std::string_view sql, std::span<const encoded_param_t> params, bool with_sync);
 

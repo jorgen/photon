@@ -1,10 +1,13 @@
 #include "photon/connection.h"
 
+#include <chrono>
 #include <cstddef>
 #include <optional>
 #include <span>
 #include <string_view>
 
+#include <vio/cancellation.h>
+#include <vio/operation/sleep.h>
 #include <vio/operation/tcp.h>
 
 #include "photon/detail/scram.h"
@@ -92,6 +95,36 @@ vio::task_t<result_t<bool>> request_ssl(vio::tcp_t &tcp)
   }
   co_return static_cast<char>(response[0]) == 'S';
 }
+
+vio::task_t<result_t<std::unique_ptr<detail::transport_t>>> establish_transport(vio::event_loop_t &loop, const connect_params_t &params)
+{
+  auto tcp_result = co_await detail::connect_raw_tcp(loop, params.host, params.port, params.connect_timeout);
+  if (!tcp_result.has_value())
+  {
+    co_return std::unexpected(tcp_result.error());
+  }
+  vio::tcp_t tcp = std::move(*tcp_result.value());
+
+  if (!sslmode_attempts_tls(params.sslmode))
+  {
+    co_return detail::make_tcp_transport(std::move(tcp));
+  }
+
+  auto ssl_supported = co_await request_ssl(tcp);
+  if (!ssl_supported.has_value())
+  {
+    co_return std::unexpected(ssl_supported.error());
+  }
+  if (*ssl_supported)
+  {
+    co_return co_await detail::upgrade_to_tls(std::move(tcp), build_ssl_config(params), tls_peer_name(params));
+  }
+  if (sslmode_requires_tls(params.sslmode))
+  {
+    co_return fail(error_kind_t::connection, "server does not support SSL but sslmode requires it");
+  }
+  co_return detail::make_tcp_transport(std::move(tcp));
+}
 } // namespace
 
 connection_t::connection_t(vio::event_loop_t &loop, std::unique_ptr<detail::transport_t> transport, connect_params_t params)
@@ -114,61 +147,39 @@ vio::task_t<result_t<std::shared_ptr<connection_t>>> connection_t::connect(vio::
 
 vio::task_t<result_t<std::shared_ptr<connection_t>>> connection_t::connect(vio::event_loop_t &loop, connect_params_t params)
 {
-  auto tcp_result = co_await detail::connect_raw_tcp(loop, params.host, params.port, params.connect_timeout);
-  if (!tcp_result.has_value())
+  auto transport = co_await establish_transport(loop, params);
+  if (!transport.has_value())
   {
-    co_return std::unexpected(tcp_result.error());
-  }
-  vio::tcp_t tcp = std::move(*tcp_result.value());
-
-  std::unique_ptr<detail::transport_t> transport;
-  if (!sslmode_attempts_tls(params.sslmode))
-  {
-    auto plain = detail::make_tcp_transport(std::move(tcp));
-    if (!plain.has_value())
-    {
-      co_return std::unexpected(plain.error());
-    }
-    transport = std::move(plain.value());
-  }
-  else
-  {
-    auto ssl_supported = co_await request_ssl(tcp);
-    if (!ssl_supported.has_value())
-    {
-      co_return std::unexpected(ssl_supported.error());
-    }
-    if (*ssl_supported)
-    {
-      auto tls = co_await detail::upgrade_to_tls(std::move(tcp), build_ssl_config(params), tls_peer_name(params));
-      if (!tls.has_value())
-      {
-        co_return std::unexpected(tls.error());
-      }
-      transport = std::move(tls.value());
-    }
-    else if (sslmode_requires_tls(params.sslmode))
-    {
-      co_return fail(error_kind_t::connection, "server does not support SSL but sslmode requires it");
-    }
-    else
-    {
-      auto plain = detail::make_tcp_transport(std::move(tcp));
-      if (!plain.has_value())
-      {
-        co_return std::unexpected(plain.error());
-      }
-      transport = std::move(plain.value());
-    }
+    co_return std::unexpected(transport.error());
   }
 
-  auto connection = std::shared_ptr<connection_t>(new connection_t(loop, std::move(transport), std::move(params)));
+  auto connection = std::shared_ptr<connection_t>(new connection_t(loop, std::move(*transport), std::move(params)));
   auto ready = co_await connection->handshake();
   if (!ready.has_value())
   {
     co_return std::unexpected(ready.error());
   }
   co_return connection;
+}
+
+vio::task_t<result_t<void>> cancel_handle_t::cancel(vio::event_loop_t &loop) const
+{
+  if (_process_id == 0)
+  {
+    co_return fail(error_kind_t::connection, "connection has no backend key data to cancel");
+  }
+  auto transport = co_await establish_transport(loop, _params);
+  if (!transport.has_value())
+  {
+    co_return std::unexpected(transport.error());
+  }
+  auto sent = co_await (*transport)->write_all(detail::cancel_request_message(_process_id, _secret_key));
+  if (!sent.has_value())
+  {
+    co_return std::unexpected(sent.error());
+  }
+  (*transport)->close();
+  co_return result_t<void>{};
 }
 
 vio::task_t<result_t<void>> connection_t::handshake()
@@ -410,6 +421,36 @@ vio::task_t<result_t<detail::query_data_t>> connection_t::exec_extended(std::str
 }
 
 vio::task_t<result_t<detail::query_data_t>> connection_t::read_query_result()
+{
+  if (_params.query_timeout.count() <= 0)
+  {
+    co_return co_await read_frames();
+  }
+
+  vio::cancellation_t token;
+  bool timed_out = false;
+  auto watchdog = [](vio::event_loop_t &loop, detail::transport_t *transport, vio::cancellation_t &cancel_token, std::chrono::milliseconds duration, bool &flag) -> vio::task_t<void>
+  {
+    auto fired = co_await vio::sleep(loop, duration, &cancel_token);
+    if (fired.has_value() && !cancel_token.is_cancelled())
+    {
+      flag = true;
+      transport->cancel_read();
+    }
+  }(*_loop, _transport.get(), token, _params.query_timeout, timed_out);
+
+  auto result = co_await read_frames();
+  token.cancel();
+  co_await std::move(watchdog);
+
+  if (timed_out)
+  {
+    co_return fail(error_kind_t::timeout, "query timed out");
+  }
+  co_return result;
+}
+
+vio::task_t<result_t<detail::query_data_t>> connection_t::read_frames()
 {
   detail::query_data_t data;
   std::optional<error_t> server_error;

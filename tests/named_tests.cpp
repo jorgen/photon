@@ -81,6 +81,15 @@ TEST_CASE("colons inside comments are ignored")
   CHECK(block.params.size() == 1);
 }
 
+TEST_CASE("a backslash-escaped quote in an E-string does not end the literal early")
+{
+  named_args_t a;
+  a.set("b", 1);
+  auto r = must_rewrite("SELECT x FROM t WHERE c = E'a\\':b' AND d = :b", a);
+  CHECK(r.sql == "SELECT x FROM t WHERE c = E'a\\':b' AND d = $1");
+  CHECK(r.params.size() == 1);
+}
+
 TEST_CASE("an array slice with numeric bounds is not mistaken for a param")
 {
   named_args_t a;

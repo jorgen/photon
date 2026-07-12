@@ -14,6 +14,7 @@ add_executable(photon_tests
         pipeline_tests.cpp
         named_tests.cpp
         integration_tests.cpp
+        stress_tests.cpp
 )
 if (PHOTON_WITH_PRISM)
     target_sources(photon_tests PRIVATE prism_integration_tests.cpp)

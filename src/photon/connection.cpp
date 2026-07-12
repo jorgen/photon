@@ -407,6 +407,10 @@ vio::task_t<result_t<void>> connection_t::authenticate_scram(std::span<const std
 
 vio::task_t<result_t<detail::query_data_t>> connection_t::exec_extended(std::string_view statement_name, std::string_view sql, std::vector<encoded_param_t> params)
 {
+  if (_broken)
+  {
+    co_return fail(error_kind_t::connection, "connection is broken");
+  }
   std::vector<std::uint8_t> out;
   detail::append_extended_query(out, statement_name, sql, params, true);
 
@@ -518,6 +522,10 @@ vio::task_t<result_t<detail::query_data_t>> connection_t::read_frames()
 
 vio::task_t<result_t<void>> connection_t::parse_statement(std::string name, std::string_view sql)
 {
+  if (_broken)
+  {
+    co_return fail(error_kind_t::connection, "connection is broken");
+  }
   std::vector<std::uint8_t> out;
   auto append = [&out](std::vector<std::uint8_t> message) { out.insert(out.end(), message.begin(), message.end()); };
   append(detail::parse_message(name, sql, {}));
@@ -612,6 +620,10 @@ vio::task_t<result_t<void>> connection_t::listen(std::string_view channel)
 
 vio::task_t<result_t<notification_t>> connection_t::next_notification()
 {
+  if (_broken)
+  {
+    co_return fail(error_kind_t::connection, "connection is broken");
+  }
   for (;;)
   {
     auto message = co_await _reader.next();

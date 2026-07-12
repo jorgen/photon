@@ -234,6 +234,10 @@ vio::task_t<result_t<std::string>> copy_out_t::read_all()
 
 vio::task_t<result_t<copy_in_t>> connection_t::copy_in(std::string_view sql)
 {
+  if (_broken)
+  {
+    co_return fail(error_kind_t::connection, "connection is broken");
+  }
   auto sent = co_await _transport->write_all(detail::query_message(sql));
   if (!sent.has_value())
   {
@@ -263,20 +267,42 @@ vio::task_t<result_t<copy_in_t>> connection_t::copy_in(std::string_view sql)
       }
       co_return std::unexpected(surfaced);
     }
+    case detail::backend_tag_t::parameter_status:
+    {
+      auto status = detail::parse_parameter_status(message->body);
+      if (status.has_value())
+      {
+        _server_params.push_back(std::move(*status));
+      }
+      break;
+    }
     case detail::backend_tag_t::notice_response:
       dispatch_notice(message->body);
       break;
     case detail::backend_tag_t::notification_response:
       dispatch_notification(message->body);
       break;
+    case detail::backend_tag_t::ready_for_query:
+      co_return fail(error_kind_t::protocol, "statement did not initiate COPY IN");
     default:
-      break;
+    {
+      auto drained = co_await drain_to_ready();
+      if (!drained.has_value())
+      {
+        co_return std::unexpected(drained.error());
+      }
+      co_return fail(error_kind_t::protocol, "statement did not initiate COPY IN");
+    }
     }
   }
 }
 
 vio::task_t<result_t<copy_out_t>> connection_t::copy_out(std::string_view sql)
 {
+  if (_broken)
+  {
+    co_return fail(error_kind_t::connection, "connection is broken");
+  }
   auto sent = co_await _transport->write_all(detail::query_message(sql));
   if (!sent.has_value())
   {
@@ -306,14 +332,32 @@ vio::task_t<result_t<copy_out_t>> connection_t::copy_out(std::string_view sql)
       }
       co_return std::unexpected(surfaced);
     }
+    case detail::backend_tag_t::parameter_status:
+    {
+      auto status = detail::parse_parameter_status(message->body);
+      if (status.has_value())
+      {
+        _server_params.push_back(std::move(*status));
+      }
+      break;
+    }
     case detail::backend_tag_t::notice_response:
       dispatch_notice(message->body);
       break;
     case detail::backend_tag_t::notification_response:
       dispatch_notification(message->body);
       break;
+    case detail::backend_tag_t::ready_for_query:
+      co_return fail(error_kind_t::protocol, "statement did not initiate COPY OUT");
     default:
-      break;
+    {
+      auto drained = co_await drain_to_ready();
+      if (!drained.has_value())
+      {
+        co_return std::unexpected(drained.error());
+      }
+      co_return fail(error_kind_t::protocol, "statement did not initiate COPY OUT");
+    }
     }
   }
 }

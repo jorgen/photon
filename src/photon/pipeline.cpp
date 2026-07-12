@@ -33,6 +33,15 @@ vio::task_t<result_t<void>> pipeline_t::run()
   {
     co_return result_t<void>{};
   }
+  if (_conn->is_broken())
+  {
+    error_t err = broken_error();
+    for (auto &finisher : _finishers)
+    {
+      finisher(std::unexpected(err));
+    }
+    co_return std::unexpected(err);
+  }
 
   if (_mode == pipeline_mode_t::atomic)
   {

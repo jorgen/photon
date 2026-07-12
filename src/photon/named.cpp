@@ -90,9 +90,16 @@ result_t<rewritten_query_t> rewrite_named_params(std::string_view sql, const std
     if (c == '\'' || c == '"')
     {
       char quote = c;
+      bool escapes = quote == '\'' && i > 0 && (sql[i - 1] == 'E' || sql[i - 1] == 'e') && (i < 2 || !is_ident(sql[i - 2]));
       out.sql.push_back(sql[i++]);
       while (i < sql.size())
       {
+        if (escapes && sql[i] == '\\' && i + 1 < sql.size())
+        {
+          out.sql.push_back(sql[i++]);
+          out.sql.push_back(sql[i++]);
+          continue;
+        }
         if (sql[i] == quote)
         {
           out.sql.push_back(sql[i++]);

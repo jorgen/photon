@@ -5,6 +5,7 @@
 #include "decode.h"
 #include "error.h"
 #include "params.h"
+#include "pipeline.h"
 #include "pool.h"
 #include "result.h"
 #include "transaction.h"

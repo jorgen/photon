@@ -35,6 +35,8 @@ std::vector<std::uint8_t> sync_message();
 std::vector<std::uint8_t> query_message(std::string_view sql);
 std::vector<std::uint8_t> terminate_message();
 
+void append_extended_query(std::vector<std::uint8_t> &out, std::string_view statement, std::string_view sql, std::span<const encoded_param_t> params, bool with_sync);
+
 struct auth_message_t
 {
   auth_request_t type = auth_request_t::ok;
@@ -72,6 +74,14 @@ struct field_description_t
 struct row_description_t
 {
   std::vector<field_description_t> fields;
+};
+
+struct query_data_t
+{
+  row_description_t description;
+  std::vector<std::vector<std::uint8_t>> rows;
+  std::string command_tag;
+  bool has_description = false;
 };
 
 struct data_row_t

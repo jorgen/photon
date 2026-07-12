@@ -45,6 +45,19 @@ struct id_row_t
   std::int32_t id;
   STFY_OBJ(id);
 };
+
+struct pipe_row_t
+{
+  std::int32_t id;
+  std::string label;
+  STFY_OBJ(id, label);
+};
+
+struct blob_row_t
+{
+  std::string blob;
+  STFY_OBJ(blob);
+};
 } // namespace
 
 TEST_CASE("integration: connect over SCRAM, typed SELECT with a bound param, NULL handling")
@@ -596,6 +609,398 @@ TEST_CASE("integration: LISTEN/NOTIFY delivers the process id, channel and paylo
 
       co_await (*listener)->close();
       co_await (*notifier)->close();
+      co_return 0;
+    });
+  CHECK(rc == 0);
+}
+
+TEST_CASE("integration: builder pipeline runs heterogeneous steps in one round-trip")
+{
+  const char *dsn = std::getenv("PHOTON_PG_TEST_DSN");
+  if (dsn == nullptr)
+  {
+    MESSAGE("PHOTON_PG_TEST_DSN is unset; skipping the pipeline builder test");
+    return;
+  }
+  std::string dsn_text = dsn;
+
+  int rc = vio::run(
+    [&dsn_text](vio::event_loop_t &loop) -> vio::task_t<int>
+    {
+      auto connection = co_await photon::connection_t::connect(loop, dsn_text);
+      if (!connection.has_value())
+      {
+        MESSAGE("connect failed: " << connection.error().msg);
+        co_return 1;
+      }
+      auto &conn = *connection;
+
+      (void)co_await conn->execute("DROP TABLE IF EXISTS photon_pipe");
+      auto create = co_await conn->execute("CREATE TABLE photon_pipe(id int PRIMARY KEY, label text)");
+      REQUIRE(create.has_value());
+
+      auto pipe = conn->pipeline();
+      auto ins = pipe.execute("INSERT INTO photon_pipe(id, label) VALUES (1,'a'),(2,'b'),(3,'c')");
+      auto sel = pipe.query<pipe_row_t>("SELECT id, label FROM photon_pipe ORDER BY id");
+      auto upd = pipe.execute("UPDATE photon_pipe SET label = 'z' WHERE id = $1", 2);
+      auto ran = co_await pipe.run();
+      REQUIRE(ran.has_value());
+
+      auto ins_r = ins.get();
+      REQUIRE(ins_r.has_value());
+      CHECK(ins_r->rows_affected == 3);
+
+      auto sel_r = sel.get();
+      REQUIRE(sel_r.has_value());
+      auto rows = sel_r->collect();
+      REQUIRE(rows.has_value());
+      REQUIRE(rows->size() == 3);
+      CHECK((*rows)[0].label == "a");
+      CHECK((*rows)[1].label == "b");
+
+      auto upd_r = upd.get();
+      REQUIRE(upd_r.has_value());
+      CHECK(upd_r->rows_affected == 1);
+
+      auto label2 = co_await conn->query_value<std::string>("SELECT label FROM photon_pipe WHERE id = 2");
+      REQUIRE(label2.has_value());
+      REQUIRE(label2->has_value());
+      CHECK(**label2 == "z");
+
+      (void)co_await conn->execute("DROP TABLE photon_pipe");
+      co_await conn->close();
+      co_return 0;
+    });
+  CHECK(rc == 0);
+}
+
+TEST_CASE("integration: variadic one-shot pipeline returns a typed tuple")
+{
+  const char *dsn = std::getenv("PHOTON_PG_TEST_DSN");
+  if (dsn == nullptr)
+  {
+    MESSAGE("PHOTON_PG_TEST_DSN is unset; skipping the pipeline tuple test");
+    return;
+  }
+  std::string dsn_text = dsn;
+
+  int rc = vio::run(
+    [&dsn_text](vio::event_loop_t &loop) -> vio::task_t<int>
+    {
+      auto connection = co_await photon::connection_t::connect(loop, dsn_text);
+      if (!connection.has_value())
+      {
+        MESSAGE("connect failed: " << connection.error().msg);
+        co_return 1;
+      }
+      auto &conn = *connection;
+
+      (void)co_await conn->execute("DROP TABLE IF EXISTS photon_pipe_tuple");
+      auto create = co_await conn->execute("CREATE TABLE photon_pipe_tuple(id int PRIMARY KEY, label text)");
+      REQUIRE(create.has_value());
+      auto seed = co_await conn->execute("INSERT INTO photon_pipe_tuple(id, label) VALUES (1,'a'),(2,'b')");
+      REQUIRE(seed.has_value());
+
+      auto tuple_result = co_await conn->pipeline(
+        photon::pquery<pipe_row_t>("SELECT id, label FROM photon_pipe_tuple ORDER BY id"),
+        photon::pexecute("UPDATE photon_pipe_tuple SET label = 'y' WHERE id = $1", 2));
+      auto &[sel, upd] = tuple_result;
+
+      REQUIRE(sel.has_value());
+      auto rows = sel->collect();
+      REQUIRE(rows.has_value());
+      REQUIRE(rows->size() == 2);
+      CHECK((*rows)[0].label == "a");
+      REQUIRE(upd.has_value());
+      CHECK(upd->rows_affected == 1);
+
+      auto atomic_tuple = co_await conn->pipeline(photon::pipeline_mode_t::atomic, photon::pquery<pipe_row_t>("SELECT id, label FROM photon_pipe_tuple WHERE id = 2"));
+      auto &[only] = atomic_tuple;
+      REQUIRE(only.has_value());
+      auto one = only->one();
+      REQUIRE(one.has_value());
+      REQUIRE(one->has_value());
+      CHECK((*one)->label == "y");
+
+      (void)co_await conn->execute("DROP TABLE photon_pipe_tuple");
+      co_await conn->close();
+      co_return 0;
+    });
+  CHECK(rc == 0);
+}
+
+TEST_CASE("integration: independent pipeline steps fail independently")
+{
+  const char *dsn = std::getenv("PHOTON_PG_TEST_DSN");
+  if (dsn == nullptr)
+  {
+    MESSAGE("PHOTON_PG_TEST_DSN is unset; skipping the pipeline independence test");
+    return;
+  }
+  std::string dsn_text = dsn;
+
+  int rc = vio::run(
+    [&dsn_text](vio::event_loop_t &loop) -> vio::task_t<int>
+    {
+      auto connection = co_await photon::connection_t::connect(loop, dsn_text);
+      if (!connection.has_value())
+      {
+        MESSAGE("connect failed: " << connection.error().msg);
+        co_return 1;
+      }
+      auto &conn = *connection;
+
+      (void)co_await conn->execute("DROP TABLE IF EXISTS photon_pipe_ind");
+      auto create = co_await conn->execute("CREATE TABLE photon_pipe_ind(id int PRIMARY KEY)");
+      REQUIRE(create.has_value());
+      auto seed = co_await conn->execute("INSERT INTO photon_pipe_ind(id) VALUES (1)");
+      REQUIRE(seed.has_value());
+
+      auto pipe = conn->pipeline();
+      auto ok1 = pipe.execute("INSERT INTO photon_pipe_ind(id) VALUES (2)");
+      auto bad = pipe.execute("INSERT INTO photon_pipe_ind(id) VALUES (1)");
+      auto ok2 = pipe.execute("INSERT INTO photon_pipe_ind(id) VALUES (3)");
+      auto ran = co_await pipe.run();
+      REQUIRE(ran.has_value());
+
+      CHECK(ok1.get().has_value());
+      auto bad_r = bad.get();
+      REQUIRE_FALSE(bad_r.has_value());
+      CHECK(photon::is_unique_violation(bad_r.error()));
+      CHECK(ok2.get().has_value());
+      CHECK_FALSE(conn->is_broken());
+
+      auto count = co_await conn->query_value<std::int64_t>("SELECT count(*) FROM photon_pipe_ind");
+      REQUIRE(count.has_value());
+      REQUIRE(count->has_value());
+      CHECK(**count == 3);
+
+      (void)co_await conn->execute("DROP TABLE photon_pipe_ind");
+      co_await conn->close();
+      co_return 0;
+    });
+  CHECK(rc == 0);
+}
+
+TEST_CASE("integration: atomic pipeline rolls the whole batch back on an error")
+{
+  const char *dsn = std::getenv("PHOTON_PG_TEST_DSN");
+  if (dsn == nullptr)
+  {
+    MESSAGE("PHOTON_PG_TEST_DSN is unset; skipping the atomic pipeline test");
+    return;
+  }
+  std::string dsn_text = dsn;
+
+  int rc = vio::run(
+    [&dsn_text](vio::event_loop_t &loop) -> vio::task_t<int>
+    {
+      auto connection = co_await photon::connection_t::connect(loop, dsn_text);
+      if (!connection.has_value())
+      {
+        MESSAGE("connect failed: " << connection.error().msg);
+        co_return 1;
+      }
+      auto &conn = *connection;
+
+      (void)co_await conn->execute("DROP TABLE IF EXISTS photon_pipe_atom");
+      auto create = co_await conn->execute("CREATE TABLE photon_pipe_atom(id int PRIMARY KEY)");
+      REQUIRE(create.has_value());
+      auto seed = co_await conn->execute("INSERT INTO photon_pipe_atom(id) VALUES (1)");
+      REQUIRE(seed.has_value());
+
+      auto pipe = conn->pipeline(photon::pipeline_mode_t::atomic);
+      auto a = pipe.execute("INSERT INTO photon_pipe_atom(id) VALUES (10)");
+      auto b = pipe.execute("INSERT INTO photon_pipe_atom(id) VALUES (1)");
+      auto c = pipe.execute("INSERT INTO photon_pipe_atom(id) VALUES (11)");
+      auto ran = co_await pipe.run();
+      REQUIRE_FALSE(ran.has_value());
+      CHECK(photon::is_unique_violation(ran.error()));
+
+      CHECK(a.get().has_value());
+      auto b_r = b.get();
+      REQUIRE_FALSE(b_r.has_value());
+      CHECK(photon::is_unique_violation(b_r.error()));
+      CHECK_FALSE(c.get().has_value());
+
+      auto count = co_await conn->query_value<std::int64_t>("SELECT count(*) FROM photon_pipe_atom");
+      REQUIRE(count.has_value());
+      REQUIRE(count->has_value());
+      CHECK(**count == 1);
+
+      auto committed = conn->pipeline(photon::pipeline_mode_t::atomic);
+      auto d = committed.execute("INSERT INTO photon_pipe_atom(id) VALUES (20)");
+      auto e = committed.execute("INSERT INTO photon_pipe_atom(id) VALUES (21)");
+      auto ran2 = co_await committed.run();
+      REQUIRE(ran2.has_value());
+      CHECK(d.get().has_value());
+      CHECK(e.get().has_value());
+
+      auto count2 = co_await conn->query_value<std::int64_t>("SELECT count(*) FROM photon_pipe_atom");
+      REQUIRE(count2.has_value());
+      REQUIRE(count2->has_value());
+      CHECK(**count2 == 3);
+
+      (void)co_await conn->execute("DROP TABLE photon_pipe_atom");
+      co_await conn->close();
+      co_return 0;
+    });
+  CHECK(rc == 0);
+}
+
+TEST_CASE("integration: atomic pipeline surfaces a commit-phase (deferred constraint) error")
+{
+  const char *dsn = std::getenv("PHOTON_PG_TEST_DSN");
+  if (dsn == nullptr)
+  {
+    MESSAGE("PHOTON_PG_TEST_DSN is unset; skipping the deferred-constraint pipeline test");
+    return;
+  }
+  std::string dsn_text = dsn;
+
+  int rc = vio::run(
+    [&dsn_text](vio::event_loop_t &loop) -> vio::task_t<int>
+    {
+      auto connection = co_await photon::connection_t::connect(loop, dsn_text);
+      if (!connection.has_value())
+      {
+        MESSAGE("connect failed: " << connection.error().msg);
+        co_return 1;
+      }
+      auto &conn = *connection;
+
+      (void)co_await conn->execute("DROP TABLE IF EXISTS photon_pipe_defer");
+      auto create = co_await conn->execute("CREATE TABLE photon_pipe_defer(id int)");
+      REQUIRE(create.has_value());
+      auto constraint = co_await conn->execute("ALTER TABLE photon_pipe_defer ADD CONSTRAINT photon_pipe_defer_uq UNIQUE(id) DEFERRABLE INITIALLY DEFERRED");
+      REQUIRE(constraint.has_value());
+
+      auto pipe = conn->pipeline(photon::pipeline_mode_t::atomic);
+      auto a = pipe.execute("INSERT INTO photon_pipe_defer(id) VALUES (5)");
+      auto b = pipe.execute("INSERT INTO photon_pipe_defer(id) VALUES (5)");
+      auto ran = co_await pipe.run();
+      REQUIRE_FALSE(ran.has_value());
+      CHECK(photon::is_unique_violation(ran.error()));
+
+      CHECK(a.get().has_value());
+      CHECK(b.get().has_value());
+
+      auto count = co_await conn->query_value<std::int64_t>("SELECT count(*) FROM photon_pipe_defer");
+      REQUIRE(count.has_value());
+      REQUIRE(count->has_value());
+      CHECK(**count == 0);
+
+      (void)co_await conn->execute("DROP TABLE photon_pipe_defer");
+      co_await conn->close();
+      co_return 0;
+    });
+  CHECK(rc == 0);
+}
+
+TEST_CASE("integration: a large pipeline does not deadlock (concurrent write and read)")
+{
+  const char *dsn = std::getenv("PHOTON_PG_TEST_DSN");
+  if (dsn == nullptr)
+  {
+    MESSAGE("PHOTON_PG_TEST_DSN is unset; skipping the large-pipeline deadlock test");
+    return;
+  }
+  std::string dsn_text = dsn;
+
+  int rc = vio::run(
+    [&dsn_text](vio::event_loop_t &loop) -> vio::task_t<int>
+    {
+      auto connection = co_await photon::connection_t::connect(loop, dsn_text);
+      if (!connection.has_value())
+      {
+        MESSAGE("connect failed: " << connection.error().msg);
+        co_return 1;
+      }
+      auto &conn = *connection;
+
+      constexpr int steps = 64;
+      const std::string big(256 * 1024, 'x');
+
+      auto pipe = conn->pipeline();
+      std::vector<photon::pipe_slot_t<photon::result_set_t<blob_row_t>>> slots;
+      slots.reserve(steps);
+      for (int i = 0; i < steps; ++i)
+      {
+        slots.push_back(pipe.query<blob_row_t>("SELECT $1::text AS blob", big));
+      }
+      auto ran = co_await pipe.run();
+      REQUIRE(ran.has_value());
+
+      for (auto &slot : slots)
+      {
+        auto set = slot.get();
+        REQUIRE(set.has_value());
+        auto one = set->one();
+        REQUIRE(one.has_value());
+        REQUIRE(one->has_value());
+        CHECK((*one)->blob.size() == big.size());
+      }
+
+      co_await conn->close();
+      co_return 0;
+    });
+  CHECK(rc == 0);
+}
+
+TEST_CASE("integration: a large pipeline over TLS does not deadlock")
+{
+  const char *dsn = std::getenv("PHOTON_PG_TEST_DSN");
+  const char *tls = std::getenv("PHOTON_PG_SSLROOTCERT");
+  if (dsn == nullptr || tls == nullptr)
+  {
+    MESSAGE("PHOTON_PG_TEST_DSN / PHOTON_PG_SSLROOTCERT unset; skipping the TLS large-pipeline test");
+    return;
+  }
+  std::string dsn_text = dsn;
+
+  int rc = vio::run(
+    [&dsn_text](vio::event_loop_t &loop) -> vio::task_t<int>
+    {
+      auto params = photon::parse_dsn(dsn_text);
+      if (!params.has_value())
+      {
+        MESSAGE("bad DSN: " << params.error().msg);
+        co_return 1;
+      }
+      params->sslmode = photon::sslmode_t::require;
+
+      auto connection = co_await photon::connection_t::connect(loop, *params);
+      if (!connection.has_value())
+      {
+        MESSAGE("TLS connect failed: " << connection.error().msg);
+        co_return 1;
+      }
+      auto &conn = *connection;
+
+      constexpr int steps = 48;
+      const std::string big(256 * 1024, 'y');
+
+      auto pipe = conn->pipeline();
+      std::vector<photon::pipe_slot_t<photon::result_set_t<blob_row_t>>> slots;
+      slots.reserve(steps);
+      for (int i = 0; i < steps; ++i)
+      {
+        slots.push_back(pipe.query<blob_row_t>("SELECT $1::text AS blob", big));
+      }
+      auto ran = co_await pipe.run();
+      REQUIRE(ran.has_value());
+
+      for (auto &slot : slots)
+      {
+        auto set = slot.get();
+        REQUIRE(set.has_value());
+        auto one = set->one();
+        REQUIRE(one.has_value());
+        REQUIRE(one->has_value());
+        CHECK((*one)->blob.size() == big.size());
+      }
+
+      co_await conn->close();
       co_return 0;
     });
   CHECK(rc == 0);

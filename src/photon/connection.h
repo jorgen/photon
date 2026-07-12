@@ -8,6 +8,8 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -20,23 +22,13 @@
 #include "photon/detail/transport.h"
 #include "photon/error.h"
 #include "photon/params.h"
+#include "photon/pipeline.h"
 #include "photon/result.h"
 #include "photon/row_binding.h"
 #include "photon/transaction.h"
 
 namespace photon
 {
-namespace detail
-{
-struct query_data_t
-{
-  row_description_t description;
-  std::vector<std::vector<std::uint8_t>> rows;
-  std::string command_tag;
-  bool has_description = false;
-};
-} // namespace detail
-
 struct notification_t
 {
   std::int32_t process_id = 0;
@@ -162,6 +154,23 @@ public:
 
   vio::task_t<result_t<transaction_t>> begin();
 
+  pipeline_t pipeline(pipeline_mode_t mode = pipeline_mode_t::independent)
+  {
+    return pipeline_t(this, mode);
+  }
+
+  template <typename S0, typename... S, std::enable_if_t<is_pipe_step_v<S0>, int> = 0>
+  vio::task_t<std::tuple<step_result_t<S0>, step_result_t<S>...>> pipeline(S0 first, S... rest)
+  {
+    return run_pipeline_steps(pipeline_mode_t::independent, std::move(first), std::move(rest)...);
+  }
+
+  template <typename S0, typename... S, std::enable_if_t<is_pipe_step_v<S0>, int> = 0>
+  vio::task_t<std::tuple<step_result_t<S0>, step_result_t<S>...>> pipeline(pipeline_mode_t mode, S0 first, S... rest)
+  {
+    return run_pipeline_steps(mode, std::move(first), std::move(rest)...);
+  }
+
   vio::task_t<void> close();
 
   void on_notice(std::function<void(const server_error_t &)> handler)
@@ -191,6 +200,7 @@ public:
 private:
   friend class prepared_statement_t;
   friend class transaction_t;
+  friend class pipeline_t;
 
   connection_t(vio::event_loop_t &loop, std::unique_ptr<detail::transport_t> transport, connect_params_t params);
 
@@ -198,7 +208,17 @@ private:
   vio::task_t<result_t<detail::raw_message_t>> next_significant_frame();
   vio::task_t<result_t<void>> authenticate_scram(std::span<const std::uint8_t> mechanism_list);
   vio::task_t<result_t<detail::query_data_t>> exec_extended(std::string_view statement_name, std::string_view sql, std::vector<encoded_param_t> params);
+  vio::task_t<result_t<detail::query_data_t>> read_query_result();
   vio::task_t<result_t<void>> parse_statement(std::string name, std::string_view sql);
+
+  template <typename... Steps>
+  vio::task_t<std::tuple<step_result_t<Steps>...>> run_pipeline_steps(pipeline_mode_t mode, Steps... steps)
+  {
+    auto pipe = pipeline(mode);
+    std::tuple<step_slot_t<Steps>...> slots{steps.add_to(pipe)...};
+    co_await pipe.run();
+    co_return std::apply([](auto &...slot) { return std::make_tuple(slot.get()...); }, slots);
+  }
   void dispatch_notice(std::span<const std::uint8_t> body);
   void dispatch_notification(std::span<const std::uint8_t> body);
   void poison()

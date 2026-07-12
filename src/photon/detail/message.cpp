@@ -128,6 +128,24 @@ std::vector<std::uint8_t> terminate_message()
   return w.finish();
 }
 
+void append_extended_query(std::vector<std::uint8_t> &out, std::string_view statement, std::string_view sql, std::span<const encoded_param_t> params, bool with_sync)
+{
+  auto append = [&out](std::vector<std::uint8_t> message) { out.insert(out.end(), message.begin(), message.end()); };
+  const std::int16_t param_format = format_text;
+  const std::int16_t result_format = format_binary;
+  if (statement.empty())
+  {
+    append(parse_message("", sql, {}));
+  }
+  append(bind_message("", statement, std::span<const std::int16_t>(&param_format, 1), params, std::span<const std::int16_t>(&result_format, 1)));
+  append(describe_message('P', ""));
+  append(execute_message("", 0));
+  if (with_sync)
+  {
+    append(sync_message());
+  }
+}
+
 std::string_view error_response_t::field(char code) const
 {
   for (const auto &f : fields)

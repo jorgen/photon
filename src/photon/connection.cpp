@@ -397,18 +397,7 @@ vio::task_t<result_t<void>> connection_t::authenticate_scram(std::span<const std
 vio::task_t<result_t<detail::query_data_t>> connection_t::exec_extended(std::string_view statement_name, std::string_view sql, std::vector<encoded_param_t> params)
 {
   std::vector<std::uint8_t> out;
-  auto append = [&out](std::vector<std::uint8_t> message) { out.insert(out.end(), message.begin(), message.end()); };
-
-  const std::int16_t param_format = detail::format_text;
-  const std::int16_t result_format = detail::format_binary;
-  if (statement_name.empty())
-  {
-    append(detail::parse_message("", sql, {}));
-  }
-  append(detail::bind_message("", statement_name, std::span<const std::int16_t>(&param_format, 1), params, std::span<const std::int16_t>(&result_format, 1)));
-  append(detail::describe_message('P', ""));
-  append(detail::execute_message("", 0));
-  append(detail::sync_message());
+  detail::append_extended_query(out, statement_name, sql, params, true);
 
   auto sent = co_await _transport->write_all(std::move(out));
   if (!sent.has_value())
@@ -417,6 +406,11 @@ vio::task_t<result_t<detail::query_data_t>> connection_t::exec_extended(std::str
     co_return std::unexpected(sent.error());
   }
 
+  co_return co_await read_query_result();
+}
+
+vio::task_t<result_t<detail::query_data_t>> connection_t::read_query_result()
+{
   detail::query_data_t data;
   std::optional<error_t> server_error;
   for (;;)

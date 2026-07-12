@@ -54,6 +54,9 @@ VIO_MAIN(loop, argc, argv)
 - **Transactions** — `co_await conn->begin()` gives a move-only `transaction_t`;
   `co_await txn.commit()` / `rollback()`. Dropping it un-committed poisons the
   connection so its open transaction is discarded.
+- **Pipelining** — batch many statements into one round-trip via a builder with
+  typed result slots, or a variadic one-shot that returns a typed `std::tuple`;
+  independent (per-statement) or atomic (all-or-nothing) modes.
 - **Rich types** — beyond the scalars, `uuid`, `timestamp`/`timestamptz`
   (`std::chrono::system_clock::time_point`), `date` (`std::chrono::sys_days`),
   `bytea`, `json`/`jsonb`, and `numeric` decode straight into ergonomic C++ types.
@@ -176,6 +179,53 @@ for (int id : ids)
   auto row = co_await stmt->query_one<user_t>(id);   // parsed once, bound many times
 }
 ```
+
+## Pipelining
+
+Running N statements one-at-a-time costs N network round-trips. **Pipelining** sends
+the whole batch in one write and reads all the replies together — one round-trip.
+Build it with `conn->pipeline()`; each `query`/`execute` queues a step and hands
+back a typed slot you read after `run()`:
+
+```cpp
+auto pipe = conn->pipeline();
+auto users = pipe.query<user_t>("SELECT id, name, age FROM users WHERE age > $1", 18);
+auto n     = pipe.execute("UPDATE users SET seen = now() WHERE id = $1", 42);
+co_await pipe.run();                 // one round-trip
+
+auto rows = users.get();             // result_t<result_set_t<user_t>>
+auto upd  = n.get();                 // result_t<command_result_t>
+```
+
+Or the one-shot form, which returns a typed `std::tuple` — one element per step:
+
+```cpp
+auto batch = co_await conn->pipeline(
+  photon::pquery<user_t>("SELECT id, name, age FROM users WHERE age > $1", 18),
+  photon::pexecute("UPDATE users SET seen = now() WHERE id = $1", 42));
+auto &[users, n] = batch;            // users : result_t<result_set_t<user_t>>,  n : result_t<command_result_t>
+```
+
+By default steps are **independent** — each is its own implicit transaction, so one
+failing statement does not stop the others (its slot just carries the error), and
+`run()` succeeds as long as the connection held. Pass
+`photon::pipeline_mode_t::atomic` for all-or-nothing: the batch runs as a single
+implicit transaction, so **check `run()`'s result** — it returns the server error
+if the transaction did not commit (a failing step *or* a commit-time failure such
+as a deferred constraint or serialization error), and the whole batch is rolled
+back:
+
+```cpp
+auto pipe = conn->pipeline(photon::pipeline_mode_t::atomic);
+pipe.execute("INSERT INTO ledger(id, delta) VALUES ($1, $2)", 1, -100);
+pipe.execute("INSERT INTO ledger(id, delta) VALUES ($1, $2)", 2,  100);
+auto committed = co_await pipe.run();   // ok only if the whole batch committed
+```
+
+`run()` writes and reads concurrently, so a large batch (big request *and* big
+responses) never deadlocks. In **independent** mode `run()` fails only on a
+connection/protocol break; per-statement server errors live in each slot. Keep the
+batch bounded — the whole request and all results are buffered in memory.
 
 ## Errors
 
@@ -315,9 +365,9 @@ integration tests.
 Working: connection, SCRAM/cleartext auth, TLS (`sslmode`), typed `query`/`query_one`/
 `query_value`/`execute`, `$n` + array parameters, prepared statements, structured
 errors, notices, a per-loop connection pool + prism integration, transactions,
-`LISTEN`/`NOTIFY`, and codecs for `uuid`/`timestamp(tz)`/`date`/`bytea`/`json(b)`/
-`numeric`. Future work: `COPY`, pipelining, `CancelRequest`, and named parameters.
-See [`CLAUDE.md`](CLAUDE.md) for the architecture and roadmap.
+`LISTEN`/`NOTIFY`, codecs for `uuid`/`timestamp(tz)`/`date`/`bytea`/`json(b)`/
+`numeric`, and request pipelining. Future work: `COPY`, `CancelRequest`, and named
+parameters. See [`CLAUDE.md`](CLAUDE.md) for the architecture and roadmap.
 
 ## License
 

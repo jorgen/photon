@@ -9,6 +9,7 @@ set(public_headers
         photon/result.h
         photon/connection.h
         photon/transaction.h
+        photon/pipeline.h
         photon/pool.h
 )
 set(sources
@@ -16,6 +17,7 @@ set(sources
         photon/connect_params.cpp
         photon/connection.cpp
         photon/transaction.cpp
+        photon/pipeline.cpp
         photon/pool.cpp
         photon/detail/message.cpp
         photon/detail/scram.cpp

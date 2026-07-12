@@ -92,6 +92,18 @@ Everything above the socket is transport-agnostic and templated on a `transport_
   `rollback()`. Dropping an active transaction **poisons** the connection
   (`_broken`, so the pool evicts it and close aborts the open server transaction) —
   the safety net for the "a destructor can't `co_await`" problem.
+- `pipeline.h` / `pipeline.cpp` — request **pipelining** (many query cycles in one
+  round-trip). `conn->pipeline()` → a `pipeline_t` builder; `pipe.query<Row>` /
+  `execute` queue a step and return a typed `pipe_slot_t<T>` read after
+  `co_await pipe.run()`. Also a variadic one-shot `conn->pipeline(pquery<Row>(…),
+  pexecute(…), …)` → a typed `std::tuple`. Mode flag: `independent` (Sync per step)
+  or `atomic` (one trailing Sync = an implicit transaction). `run()` starts the
+  batch write as an **eager `task_t`**, reads all responses concurrently, then
+  joins the write — deadlock-free on TCP and TLS (vio has no `when_all`; this is
+  the eager-task idiom). The per-query read loop is factored into
+  `connection_t::read_query_result()` (shared by `exec_extended` and independent
+  pipelines); `detail::append_extended_query` frames one cycle
+  (`query_data_t` also moved to `detail/message.h`).
 - `row_binding.h` — `std::index_sequence` loop over structify metadata mapping
   result columns to struct fields.
 - `detail/message.h` / `.cpp` — frontend serializers + backend parsers (incl.
@@ -166,9 +178,13 @@ policy; only the reflection is reused.
    `numeric`), and LISTEN/NOTIFY (`on_notification` from the query read loops,
    `listen(channel)` with ident quoting, and a dedicated-listener `next_notification()`).
    Offline byte-vector codec tests + live round-trips/transaction/notify tests;
-   ASan/TSan/UBSan clean on default and `PHOTON_WITH_PRISM=ON`; reviewed. Remaining
-   breadth (future): COPY, pipelining, CancelRequest, named parameters, per-stream
-   timeouts.
+   ASan/TSan/UBSan clean on default and `PHOTON_WITH_PRISM=ON`; reviewed.
+   **6b done**: request pipelining (builder + typed slots, variadic one-shot tuple,
+   independent/atomic modes, eager-write/concurrent-read to avoid the large-transfer
+   deadlock). Offline (`append_extended_query`/slot) + live tests incl. a large-batch
+   deadlock regression over TCP and TLS; ASan/TSan/UBSan clean on default and
+   `PHOTON_WITH_PRISM=ON`; reviewed. Remaining breadth (future): COPY, CancelRequest,
+   named parameters, per-stream timeouts.
 
 ### Consuming photon + prism together
 

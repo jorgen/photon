@@ -138,6 +138,7 @@ result_t<backend_key_data_t> parse_backend_key_data(std::span<const std::uint8_t
 result_t<ready_for_query_t> parse_ready_for_query(std::span<const std::uint8_t> body);
 result_t<row_description_t> parse_row_description(std::span<const std::uint8_t> body);
 result_t<data_row_t> parse_data_row(std::span<const std::uint8_t> body);
+result_t<void> parse_data_row_into(std::span<const std::uint8_t> body, data_row_t &out);
 result_t<command_complete_t> parse_command_complete(std::span<const std::uint8_t> body);
 result_t<error_response_t> parse_error_response(std::span<const std::uint8_t> body);
 result_t<notification_response_t> parse_notification(std::span<const std::uint8_t> body);

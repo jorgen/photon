@@ -109,14 +109,21 @@ public:
   {
     std::vector<Row> out;
     out.reserve(_rows.size());
+    detail::data_row_t scratch;
     for (std::size_t i = 0; i < _rows.size(); ++i)
     {
-      auto row = at(i);
-      if (!row.has_value())
+      auto parsed = detail::parse_data_row_into(_rows[i], scratch);
+      if (!parsed.has_value())
       {
-        return std::unexpected(row.error());
+        return std::unexpected(parsed.error());
       }
-      out.push_back(std::move(*row));
+      Row row{};
+      auto bound = bind_row(scratch, _map, row);
+      if (!bound.has_value())
+      {
+        return std::unexpected(bound.error());
+      }
+      out.push_back(std::move(row));
     }
     return out;
   }

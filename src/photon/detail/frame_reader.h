@@ -38,8 +38,8 @@ public:
       co_return std::unexpected(header.error());
     }
 
-    std::uint8_t type = _buffer[0];
-    std::uint32_t length = static_cast<std::uint32_t>(_buffer[1]) << 24 | static_cast<std::uint32_t>(_buffer[2]) << 16 | static_cast<std::uint32_t>(_buffer[3]) << 8 | static_cast<std::uint32_t>(_buffer[4]);
+    std::uint8_t type = _buffer[_consumed];
+    std::uint32_t length = static_cast<std::uint32_t>(_buffer[_consumed + 1]) << 24 | static_cast<std::uint32_t>(_buffer[_consumed + 2]) << 16 | static_cast<std::uint32_t>(_buffer[_consumed + 3]) << 8 | static_cast<std::uint32_t>(_buffer[_consumed + 4]);
     if (length < 4)
     {
       co_return fail(error_kind_t::protocol, "backend message length is too small");
@@ -58,33 +58,53 @@ public:
 
     raw_message_t message;
     message.type = type;
-    message.body.assign(_buffer.begin() + 5, _buffer.begin() + static_cast<std::ptrdiff_t>(total));
-    _buffer.erase(_buffer.begin(), _buffer.begin() + static_cast<std::ptrdiff_t>(total));
+    auto begin = _buffer.begin() + static_cast<std::ptrdiff_t>(_consumed);
+    message.body.assign(begin + 5, begin + static_cast<std::ptrdiff_t>(total));
+    _consumed += total;
+    if (_consumed == _buffer.size())
+    {
+      _buffer.clear();
+      _consumed = 0;
+    }
     co_return message;
   }
 
 private:
+  static constexpr std::size_t read_chunk_size = 16384;
+
   vio::task_t<result_t<void>> fill_at_least(std::size_t need)
   {
+    if (_buffer.size() - _consumed >= need)
+    {
+      co_return result_t<void>{};
+    }
+    if (_consumed > 0)
+    {
+      _buffer.erase(_buffer.begin(), _buffer.begin() + static_cast<std::ptrdiff_t>(_consumed));
+      _consumed = 0;
+    }
     while (_buffer.size() < need)
     {
-      std::array<std::byte, 16384> chunk{};
-      auto read = co_await _transport->read_some(chunk);
+      std::size_t offset = _buffer.size();
+      _buffer.resize(offset + read_chunk_size);
+      auto read = co_await _transport->read_some(std::span<std::byte>(reinterpret_cast<std::byte *>(_buffer.data()) + offset, read_chunk_size));
       if (!read.has_value())
       {
+        _buffer.resize(offset);
         co_return std::unexpected(read.error());
       }
       if (*read == 0)
       {
+        _buffer.resize(offset);
         co_return fail(error_kind_t::connection, "server closed the connection");
       }
-      const auto *bytes = reinterpret_cast<const std::uint8_t *>(chunk.data());
-      _buffer.insert(_buffer.end(), bytes, bytes + *read);
+      _buffer.resize(offset + *read);
     }
     co_return result_t<void>{};
   }
 
   transport_t *_transport;
   std::vector<std::uint8_t> _buffer;
+  std::size_t _consumed = 0;
 };
 } // namespace photon::detail

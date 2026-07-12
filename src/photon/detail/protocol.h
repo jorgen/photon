@@ -63,6 +63,14 @@ public:
   explicit wire_writer_t(std::uint8_t type = 0)
     : _type(type)
   {
+    if (_type != 0)
+    {
+      _body.push_back(_type);
+    }
+    _body.push_back(0);
+    _body.push_back(0);
+    _body.push_back(0);
+    _body.push_back(0);
   }
 
   wire_writer_t &u8(std::uint8_t value)
@@ -108,26 +116,15 @@ public:
     return *this;
   }
 
-  std::vector<std::uint8_t> finish() const
+  std::vector<std::uint8_t> finish()
   {
-    std::vector<std::uint8_t> out;
-    std::size_t length = _body.size() + 4;
-    if (_type != 0)
-    {
-      out.reserve(length + 1);
-      out.push_back(_type);
-    }
-    else
-    {
-      out.reserve(length);
-    }
-    auto len = static_cast<std::uint32_t>(length);
-    out.push_back(static_cast<std::uint8_t>((len >> 24) & 0xFF));
-    out.push_back(static_cast<std::uint8_t>((len >> 16) & 0xFF));
-    out.push_back(static_cast<std::uint8_t>((len >> 8) & 0xFF));
-    out.push_back(static_cast<std::uint8_t>(len & 0xFF));
-    out.insert(out.end(), _body.begin(), _body.end());
-    return out;
+    std::size_t offset = _type != 0 ? 1 : 0;
+    auto len = static_cast<std::uint32_t>(_body.size() - offset);
+    _body[offset] = static_cast<std::uint8_t>((len >> 24) & 0xFF);
+    _body[offset + 1] = static_cast<std::uint8_t>((len >> 16) & 0xFF);
+    _body[offset + 2] = static_cast<std::uint8_t>((len >> 8) & 0xFF);
+    _body[offset + 3] = static_cast<std::uint8_t>(len & 0xFF);
+    return std::move(_body);
   }
 
 private:

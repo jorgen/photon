@@ -304,16 +304,19 @@ result_t<row_description_t> parse_row_description(std::span<const std::uint8_t> 
   return out;
 }
 
-result_t<data_row_t> parse_data_row(std::span<const std::uint8_t> body)
+result_t<void> parse_data_row_into(std::span<const std::uint8_t> body, data_row_t &out)
 {
+  out.columns.clear();
   wire_reader_t r(body);
   auto count = r.i16();
   if (!count.has_value())
   {
     return std::unexpected(count.error());
   }
-  data_row_t out;
-  out.columns.reserve(static_cast<std::size_t>(*count));
+  if (*count > 0)
+  {
+    out.columns.reserve(static_cast<std::size_t>(*count));
+  }
   for (std::int16_t i = 0; i < *count; ++i)
   {
     auto length = r.i32();
@@ -332,6 +335,17 @@ result_t<data_row_t> parse_data_row(std::span<const std::uint8_t> body)
       return std::unexpected(value.error());
     }
     out.columns.emplace_back(*value);
+  }
+  return {};
+}
+
+result_t<data_row_t> parse_data_row(std::span<const std::uint8_t> body)
+{
+  data_row_t out;
+  auto parsed = parse_data_row_into(body, out);
+  if (!parsed.has_value())
+  {
+    return std::unexpected(parsed.error());
   }
   return out;
 }

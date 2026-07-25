@@ -4,9 +4,9 @@
 # a pre-built copy via find_package instead of fetching). The PHOTON_ prefix is derived
 # from the project() name (PROJECT_NAME).
 
-CmDepFetchPackage(vio 00ace20
-    https://github.com/jorgen/vio/archive/00ace2093de60d8b5822a4d3125ec8d6c1287e8b.tar.gz
-    SHA256=eee57e491df19dbc66b98227dd921e5013f3c800e295c2ac7cf55dcfe04e42c9)
+CmDepFetchPackage(vio 7a8425a
+    https://github.com/jorgen/vio/archive/7a8425ab7341b0685abddb833c57cbacf1735470.tar.gz
+    SHA256=193140b975bf519a3be1de27a30c34884e0c1ce046b1f3e20a51ca09b7a150aa)
 
 CmDepFetchPackage(structify b8fec28d24
     https://github.com/jorgen/structify/archive/b8fec28d2449640e4c5668a59c736555e50aee81.tar.gz
